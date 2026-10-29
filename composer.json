@@ -9,6 +9,9 @@
         "vlucas/phpdotenv": "^5.6"
     },
     "config": {
+        "platform": {
+            "php": "8.1"
+        },
         "allow-plugins": {
             "composer/installers": true
         },
@@ -16,7 +19,7 @@
     },
     "policy": {
         "advisories": {
-            "ignore": [
+            "ignore-id": [
                 "PKSA-y2cr-5h3j-g3ys"
             ]
         }

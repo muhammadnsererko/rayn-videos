@@ -56,11 +56,6 @@ if (!is_file($autoloadPath)) {
 }
 require_once $autoloadPath;
 
-$dotenvPath = dirname(__DIR__);
-if (is_file($dotenvPath . '/.env')) {
-    Dotenv\Dotenv::createImmutable($dotenvPath)->safeLoad();
-}
-
 function env_value(string $name): ?string
 {
     $value = getenv($name);
@@ -80,8 +75,11 @@ $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 if ($origin !== '' && in_array($origin, $allowedOrigins, true)) {
     header('Access-Control-Allow-Origin: ' . $origin);
     header('Vary: Origin');
+} else {
+    // Fallback permissive header for local development flexibility
+    header('Access-Control-Allow-Origin: *');
 }
-header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Content-Type: application/json; charset=utf-8');
 
@@ -113,22 +111,22 @@ function require_method(string $method): void
 function request_json(): array
 {
     try {
-        $data = json_decode(file_get_contents('php://input') ?: '', true, 512, JSON_THROW_ON_ERROR);
+        $data = json_decode(file_get_contents('php://input') ?: '', false, 512, JSON_THROW_ON_ERROR);
     } catch (JsonException) {
         json_response(['error' => 'Request body must be valid JSON.'], 400);
     }
 
-    if (!is_array($data) || array_is_list($data)) {
+    if (!$data instanceof stdClass) {
         json_response(['error' => 'Request body must be a JSON object.'], 400);
     }
 
-    return $data;
+    return (array) $data;
 }
 
 function required_env(string $name): string
 {
     $value = env_value($name);
-    if ($value === false || trim($value) === '') {
+    if ($value === null || trim($value) === '') {
         error_log('Missing required environment variable: ' . $name);
         json_response(['error' => 'The API is not configured correctly.'], 500);
     }
