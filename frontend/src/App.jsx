@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
-import { Clapperboard, LogIn, LogOut, Plus, Search, ShieldCheck } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Clapperboard, LogIn, LogOut, Play, Plus, Search, ShieldCheck } from 'lucide-react';
 import AuthDialog from './components/AuthDialog';
+import PlayerDialog from './components/PlayerDialog';
 import UploadDialog from './components/UploadDialog';
 import api, { apiErrorMessage } from './services/api';
 
@@ -12,10 +13,22 @@ function readStoredUser() {
   }
 }
 
-function MovieTile({ movie }) {
+function MovieTile({ movie, onPlay }) {
   return (
     <article className="movie-tile">
-      <div className="poster-frame">
+      <div
+        className="poster-frame"
+        role="button"
+        tabIndex={0}
+        aria-label={`Play ${movie.title}`}
+        onClick={() => onPlay(movie)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onPlay(movie);
+          }
+        }}
+      >
         {movie.poster_url ? (
           <img className="poster-image" src={movie.poster_url} alt={`${movie.title} poster`} loading="lazy" />
         ) : (
@@ -25,6 +38,7 @@ function MovieTile({ movie }) {
           </div>
         )}
         <span className={`tier-tag tier-${movie.tier}`}>{movie.tier}</span>
+        <span className="poster-play-overlay" aria-hidden="true"><Play size={28} fill="currentColor" /></span>
       </div>
       <div className="movie-info">
         <h3 title={movie.title}>{movie.title}</h3>
@@ -37,6 +51,7 @@ function MovieTile({ movie }) {
 export default function App() {
   const [user, setUser] = useState(readStoredUser);
   const [authMode, setAuthMode] = useState('');
+  const [activeMovie, setActiveMovie] = useState(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [tier, setTier] = useState('all');
   const [search, setSearch] = useState('');
@@ -44,6 +59,12 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
+
+  const closePlayer = useCallback(() => setActiveMovie(null), []);
+  const signInFromPlayer = useCallback(() => {
+    setActiveMovie(null);
+    setAuthMode('login');
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -165,7 +186,9 @@ export default function App() {
             </div>
           ) : (
             <div className="movie-grid">
-              {visibleMovies.map((movie) => <MovieTile key={movie.id} movie={movie} />)}
+              {visibleMovies.map((movie) => (
+                <MovieTile key={movie.id} movie={movie} onPlay={setActiveMovie} />
+              ))}
             </div>
           )}
         </section>
@@ -183,6 +206,9 @@ export default function App() {
           onSuccess={signInComplete}
           onSwitch={() => setAuthMode((mode) => mode === 'login' ? 'signup' : 'login')}
         />
+      )}
+      {activeMovie && (
+        <PlayerDialog movie={activeMovie} onClose={closePlayer} onSignIn={signInFromPlayer} />
       )}
       {uploadOpen && <UploadDialog onClose={() => setUploadOpen(false)} onCreated={addMovie} />}
     </div>
