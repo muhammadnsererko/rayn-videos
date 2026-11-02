@@ -21,7 +21,20 @@ set +a
 php -S 127.0.0.1:8000 -t .
 ```
 
-Configure `CORS_ALLOWED_ORIGINS` as a comma-separated list of exact frontend origins. The default allows Vite at `http://localhost:5173`.
+Configure `CORS_ALLOWED_ORIGINS` as a comma-separated list of exact frontend origins. Browser requests with an unlisted origin are rejected; requests without an `Origin` header are not blocked by CORS.
+
+## Render deployment
+
+Deploy the repository root as a Docker web service. The Docker image uses PHP 8.3 with Apache and serves the existing routes beneath `/api/`. Set the Render health-check path to `/api/health.php`; it is a lightweight process liveness check and does not test the database.
+
+Set these variables in the Render service environment:
+
+- `DB_HOST`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` for Supabase PostgreSQL (`DB_PORT` is optional and defaults to `5432`).
+- `JWT_SECRET` and, optionally, `JWT_ISSUER`.
+- `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET` for the private Cloudflare R2 bucket.
+- `CORS_ALLOWED_ORIGINS` as a comma-separated list of exact deployed frontend origins.
+
+Render supplies `PORT` at runtime; the container configures Apache to bind to it. Do not add secrets to the Docker build context or image. The Docker build only includes the Composer files, `api/`, and Docker configuration.
 
 ## Endpoints
 

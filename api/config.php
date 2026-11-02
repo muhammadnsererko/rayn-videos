@@ -67,17 +67,21 @@ function env_value(string $name): ?string
     return is_string($value) ? $value : null;
 }
 
-$allowedOrigins = array_filter(array_map(
-    'trim',
-    explode(',', env_value('CORS_ALLOWED_ORIGINS') ?: 'http://localhost:5173')
+$allowedOrigins = array_values(array_filter(
+    array_map('trim', explode(',', env_value('CORS_ALLOWED_ORIGINS') ?? '')),
+    static fn (string $allowedOrigin): bool => $allowedOrigin !== '' && $allowedOrigin !== '*'
 ));
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-if ($origin !== '' && in_array($origin, $allowedOrigins, true)) {
-    header('Access-Control-Allow-Origin: ' . $origin);
+if ($origin !== '') {
     header('Vary: Origin');
-} else {
-    // Fallback permissive header for local development flexibility
-    header('Access-Control-Allow-Origin: *');
+    if (!in_array($origin, $allowedOrigins, true)) {
+        http_response_code(403);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['error' => 'Origin not allowed.'], JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    header('Access-Control-Allow-Origin: ' . $origin);
 }
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
