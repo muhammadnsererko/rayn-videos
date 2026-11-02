@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Clapperboard, LogIn, LogOut, Play, Plus, Search, ShieldCheck } from 'lucide-react';
 import AuthDialog from './components/AuthDialog';
 import PlayerDialog from './components/PlayerDialog';
@@ -13,38 +13,68 @@ function readStoredUser() {
   }
 }
 
-function MovieTile({ movie, onPlay }) {
+function sortByCreatedAt(movies) {
+  return [...movies].sort((first, second) => {
+    const firstDate = Date.parse(first.created_at || '');
+    const secondDate = Date.parse(second.created_at || '');
+    const firstHasDate = Number.isFinite(firstDate);
+    const secondHasDate = Number.isFinite(secondDate);
+
+    if (firstHasDate && secondHasDate) return secondDate - firstDate;
+    if (firstHasDate) return -1;
+    if (secondHasDate) return 1;
+    return 0;
+  });
+}
+
+function formatAddedDate(value) {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(date);
+}
+
+function MovieTile({ movie, onPlay, showAddedDate = false }) {
+  const addedDate = showAddedDate ? formatAddedDate(movie.created_at) : '';
+
   return (
     <article className="movie-tile">
-      <div
-        className="poster-frame"
-        role="button"
-        tabIndex={0}
-        aria-label={`Play ${movie.title}`}
-        onClick={() => onPlay(movie)}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault();
-            onPlay(movie);
-          }
-        }}
-      >
+      <button className="poster-frame" type="button" aria-label={`Play ${movie.title}`} onClick={() => onPlay(movie)}>
         {movie.poster_url ? (
           <img className="poster-image" src={movie.poster_url} alt={`${movie.title} poster`} loading="lazy" />
         ) : (
-          <div className="poster-placeholder" aria-label="No poster available">
+          <span className="poster-placeholder" aria-hidden="true">
             <Clapperboard size={30} strokeWidth={1.4} />
             <span>RAYN<br />PICTURES</span>
-          </div>
+          </span>
         )}
         <span className={`tier-tag tier-${movie.tier}`}>{movie.tier}</span>
         <span className="poster-play-overlay" aria-hidden="true"><Play size={28} fill="currentColor" /></span>
-      </div>
+      </button>
       <div className="movie-info">
         <h3 title={movie.title}>{movie.title}</h3>
         <p>{movie.release_year} <span aria-hidden="true">·</span> {movie.duration_minutes} min</p>
+        {addedDate && <p className="movie-added-date">Added {addedDate}</p>}
       </div>
     </article>
+  );
+}
+
+function MovieRow({ id, title, description, movies, onPlay, showAddedDate = false }) {
+  return (
+    <section className="content-section movie-row-section" id={id} aria-labelledby={`${id}-title`}>
+      <div className="section-heading">
+        <div>
+          <span className="section-kicker">RAYN COLLECTION</span>
+          <h2 id={`${id}-title`}>{title}</h2>
+        </div>
+        <p>{description}</p>
+      </div>
+      <div className="movie-row">
+        {movies.map((movie) => (
+          <MovieTile key={movie.id} movie={movie} onPlay={onPlay} showAddedDate={showAddedDate} />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -59,6 +89,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
+  const searchInputRef = useRef(null);
 
   const closePlayer = useCallback(() => setActiveMovie(null), []);
   const signInFromPlayer = useCallback(() => {
@@ -70,7 +101,7 @@ export default function App() {
     let active = true;
     setLoading(true);
     setError('');
-    api.get('/movies.php', { params: { tier } })
+    api.get('/movies.php', { params: { tier: 'all' } })
       .then(({ data }) => {
         if (active) setMovies(data.movies);
       })
@@ -81,7 +112,7 @@ export default function App() {
         if (active) setLoading(false);
       });
     return () => { active = false; };
-  }, [tier, refreshKey]);
+  }, [refreshKey]);
 
   function signInComplete(token, nextUser) {
     localStorage.setItem('rayn_token', token);
@@ -101,7 +132,15 @@ export default function App() {
     setUploadOpen(false);
   }
 
-  const visibleMovies = movies.filter((movie) => movie.title.toLowerCase().includes(search.trim().toLowerCase()));
+  const sortedMovies = sortByCreatedAt(movies);
+  const featuredMovie = sortedMovies[0];
+  const popularPicks = sortedMovies.slice(0, 8);
+  const recentlyAdded = sortedMovies.slice(0, 8);
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleMovies = sortedMovies.filter((movie) => (
+    (tier === 'all' || movie.tier === tier)
+    && movie.title.toLowerCase().includes(normalizedSearch)
+  ));
 
   return (
     <div className="app-shell">
@@ -111,12 +150,15 @@ export default function App() {
           <span>RAYN<span className="brand-light">STREAM</span></span>
         </a>
         <nav className="topnav" aria-label="Main navigation">
-          <a className="nav-active" href="#collection">Discover</a>
-          <a href="#collection">Collection</a>
+          <a className="nav-active" href="#top">Discover</a>
+          <a href="#popular-picks">Movies</a>
+          <a href="#collection" onClick={() => searchInputRef.current?.focus()}>
+            <Search size={14} aria-hidden="true" /> Search
+          </a>
         </nav>
         <div className="account-actions">
           {user?.role === 'admin' && (
-            <button className="button button-admin" type="button" onClick={() => setUploadOpen(true)}>
+            <button className="button button-admin" type="button" aria-label="Add film" onClick={() => setUploadOpen(true)}>
               <Plus size={16} /> <span>Add film</span>
             </button>
           )}
@@ -137,65 +179,151 @@ export default function App() {
       </header>
 
       <main id="top">
-        <section className="catalog-heading" id="collection">
-          <div className="heading-copy">
-            <span className="eyebrow"><span className="live-dot" /> THE RAYN COLLECTION</span>
-            <h1>Find your next<br /><em>favorite film.</em></h1>
-            <p>A considered collection of stories, ready when you are.</p>
-          </div>
-          <div className="heading-index" aria-hidden="true"><span>01</span><i /><span>R/S</span></div>
-        </section>
-
-        <section className="catalog-controls" aria-label="Filter movies">
-          <div className="filter-tabs" role="group" aria-label="Access tier">
-            {['all', 'free', 'vip'].map((option) => (
-              <button
-                className={`filter-tab ${tier === option ? 'filter-active' : ''}`}
-                key={option}
-                type="button"
-                aria-pressed={tier === option}
-                onClick={() => setTier(option)}
-              >
-                {option === 'all' ? 'All films' : option.toUpperCase()}
-              </button>
-            ))}
-          </div>
-          <label className="search-box">
-            <Search size={17} />
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search titles" aria-label="Search titles" />
-            <kbd>/</kbd>
-          </label>
-          <span className="result-count">{loading ? '…' : `${visibleMovies.length} ${visibleMovies.length === 1 ? 'FILM' : 'FILMS'}`}</span>
-        </section>
-
-        <section className="catalog-body" aria-live="polite">
-          {loading ? (
-            <div className="state-panel"><span className="loader" /><p>Loading the collection</p></div>
-          ) : error ? (
-            <div className="state-panel state-error">
-              <span className="state-kicker">CONNECTION INTERRUPTED</span>
-              <h2>We can’t reach the collection.</h2>
-              <p>{error}</p>
-              <button className="button button-outline" type="button" onClick={() => setRefreshKey((key) => key + 1)}>Try again</button>
-            </div>
-          ) : visibleMovies.length === 0 ? (
-            <div className="state-panel empty-state">
-              <Clapperboard size={27} strokeWidth={1.3} />
-              <h2>{search ? 'No matching films.' : 'The collection is waiting.'}</h2>
-              <p>{search ? 'Try another title or clear your search.' : 'New additions will appear here.'}</p>
-            </div>
-          ) : (
-            <div className="movie-grid">
-              {visibleMovies.map((movie) => (
-                <MovieTile key={movie.id} movie={movie} onPlay={setActiveMovie} />
-              ))}
-            </div>
+        <section
+          className={`hero-section ${featuredMovie?.poster_url ? 'hero-has-art' : ''}`}
+          aria-labelledby={loading ? undefined : 'hero-title'}
+          aria-label={loading ? 'Featured film' : undefined}
+        >
+          {featuredMovie?.poster_url && (
+            <img className="hero-art" src={featuredMovie.poster_url} alt="" fetchPriority="high" />
           )}
+          <div className="hero-shade" aria-hidden="true" />
+          <div className="hero-content">
+            <span className="eyebrow"><span className="live-dot" /> THE RAYN COLLECTION</span>
+            {loading ? (
+              <div className="hero-empty" role="status">
+                <span className="loader" />
+                <p>Finding your next film</p>
+              </div>
+            ) : featuredMovie ? (
+              <>
+                <span className="hero-label">FEATURED FILM</span>
+                <h1 id="hero-title">{featuredMovie.title}</h1>
+                <div className="hero-meta">
+                  {featuredMovie.release_year && <span>{featuredMovie.release_year}</span>}
+                  {featuredMovie.duration_minutes && <span>{featuredMovie.duration_minutes} min</span>}
+                  <span className={`tier-tag tier-${featuredMovie.tier}`}>{featuredMovie.tier}</span>
+                </div>
+                <p className="hero-description">
+                  {featuredMovie.description || 'No description available for this film.'}
+                </p>
+                <div className="hero-actions">
+                  <button className="button button-watch" type="button" onClick={() => setActiveMovie(featuredMovie)}>
+                    <Play size={17} fill="currentColor" /> Watch now
+                  </button>
+                  <a className="button button-explore" href="#collection">Explore collection</a>
+                </div>
+              </>
+            ) : error ? (
+              <>
+                <span className="hero-label">THE SCREENING ROOM</span>
+                <h1 id="hero-title">A home for independent film.</h1>
+                <p className="hero-description">The collection is temporarily unavailable. Please try again shortly.</p>
+                <button className="button button-explore" type="button" onClick={() => setRefreshKey((key) => key + 1)}>
+                  Try again
+                </button>
+              </>
+            ) : (
+              <>
+                <span className="hero-label">INDEPENDENT BY NATURE</span>
+                <h1 id="hero-title">Stories worth<br />settling in for.</h1>
+                <p className="hero-description">The collection is waiting for its first film.</p>
+                <a className="button button-explore" href="#collection">Explore collection</a>
+              </>
+            )}
+          </div>
+          <span className="hero-index" aria-hidden="true">RAYN / 01</span>
+        </section>
+
+        {sortedMovies.length > 0 && (
+          <>
+            <MovieRow
+              id="popular-picks"
+              title="Popular picks"
+              description="A few stories to start with."
+              movies={popularPicks}
+              onPlay={setActiveMovie}
+            />
+            <MovieRow
+              id="recently-added"
+              title="Recently added"
+              description="Fresh additions to the collection."
+              movies={recentlyAdded}
+              onPlay={setActiveMovie}
+              showAddedDate
+            />
+          </>
+        )}
+
+        <section className="content-section collection-section" id="collection" aria-labelledby="collection-title">
+          <div className="collection-heading">
+            <div className="section-heading">
+              <div>
+                <span className="section-kicker">FIND YOUR NEXT FILM</span>
+                <h2 id="collection-title">The collection</h2>
+              </div>
+              <span className="result-count">
+                {loading ? '…' : `${visibleMovies.length} ${visibleMovies.length === 1 ? 'FILM' : 'FILMS'}`}
+              </span>
+            </div>
+            <div className="catalog-controls" aria-label="Filter movies">
+              <div className="filter-tabs" role="group" aria-label="Access tier">
+                {['all', 'free', 'vip'].map((option) => (
+                  <button
+                    className={`filter-tab ${tier === option ? 'filter-active' : ''}`}
+                    key={option}
+                    type="button"
+                    aria-pressed={tier === option}
+                    onClick={() => setTier(option)}
+                  >
+                    {option === 'all' ? 'All films' : option.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+              <label className="search-box">
+                <Search size={17} aria-hidden="true" />
+                <input
+                  ref={searchInputRef}
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search titles"
+                  aria-label="Search titles"
+                />
+                <kbd aria-hidden="true">/</kbd>
+              </label>
+            </div>
+          </div>
+
+          <div className="catalog-body" aria-live="polite">
+            {loading ? (
+              <div className="state-panel"><span className="loader" /><p>Loading the collection</p></div>
+            ) : error ? (
+              <div className="state-panel state-error">
+                <span className="state-kicker">CONNECTION INTERRUPTED</span>
+                <h2>We can’t reach the collection.</h2>
+                <p>{error}</p>
+                <button className="button button-outline" type="button" onClick={() => setRefreshKey((key) => key + 1)}>Try again</button>
+              </div>
+            ) : visibleMovies.length === 0 ? (
+              <div className="state-panel empty-state">
+                <Clapperboard size={27} strokeWidth={1.3} />
+                <h2>{search ? 'No matching films.' : 'The collection is waiting.'}</h2>
+                <p>{search ? 'Try another title or clear your search.' : 'New additions will appear here.'}</p>
+              </div>
+            ) : (
+              <div className="movie-grid">
+                {visibleMovies.map((movie) => (
+                  <MovieTile key={movie.id} movie={movie} onPlay={setActiveMovie} />
+                ))}
+              </div>
+            )}
+          </div>
         </section>
       </main>
 
       <footer className="site-footer">
-        <span>RAYN STREAM <span className="footer-separator">/</span> INDEPENDENT BY NATURE</span>
+        <a className="footer-brand" href="#top">RAYN<span>STREAM</span></a>
+        <span>Independent by nature. Stories for everyone.</span>
         <span>© {new Date().getFullYear()} RAYN</span>
       </footer>
 
