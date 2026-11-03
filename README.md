@@ -11,6 +11,7 @@ PHP 8.1+ JSON API for RAYN STREAM. PostgreSQL is hosted by Supabase; video uploa
 5. Generate a JWT secret with `php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'` and put the result in `JWT_SECRET`.
 6. Create a private R2 bucket and an R2 API token with object read/write access scoped to that bucket.
 7. Promote an account to administrator from the Supabase SQL Editor after signing up: `UPDATE users SET role = 'admin' WHERE email = lower('admin@example.com');`
+8. For password resets, apply [`database/add-password-reset-tokens.sql`](database/add-password-reset-tokens.sql) to an existing database (or use the updated schema for a new database), then configure the Resend variables below. Resend's free transactional tier requires a sending domain that you own and verify.
 
 For local development, export `.env` values into the PHP server process and serve the workspace root:
 
@@ -33,6 +34,7 @@ Set these variables in the Render service environment:
 - `JWT_SECRET` and, optionally, `JWT_ISSUER`.
 - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET` for the private Cloudflare R2 bucket.
 - `CORS_ALLOWED_ORIGINS` as a comma-separated list of exact deployed frontend origins.
+- `RESEND_API_KEY`, `MAIL_FROM_EMAIL` (an address at a domain verified with Resend), and `FRONTEND_URL` (the HTTPS frontend origin used in reset links). `MAIL_FROM_NAME` is optional.
 
 Render supplies `PORT` at runtime; the container configures Apache to bind to it. Do not add secrets to the Docker build context or image. The Docker build only includes the Composer files, `api/`, and Docker configuration.
 
@@ -44,6 +46,8 @@ All request and response bodies are JSON. Protected endpoints accept `Authorizat
 | --- | --- | --- | --- |
 | POST | `/api/auth/signup.php` | Public | Create an account with `display_name`, `email`, and `password`; returns `token` and `user`. |
 | POST | `/api/auth/login.php` | Public | Authenticate with `email` and `password`; returns `token` and `user`. |
+| POST | `/api/auth/password-reset-request.php` | Public | Request a one-time password reset link; response does not disclose whether the email is registered. |
+| POST | `/api/auth/password-reset-complete.php` | Public | Set a new password with the reset token and new password. |
 | GET | `/api/movies.php?tier=all\|free\|vip` | Public | List movies. The `r2_key` is never included in list responses. |
 | POST | `/api/upload/presign.php` | Admin | Create a video upload URL with `content_type` (`video/mp4`, `video/webm`, or `video/quicktime`). Returns `upload_url`, `r2_key`, and the required `Content-Type` header. |
 | POST | `/api/movies/create.php` | Admin | Save metadata after the upload, with `title`, `description`, `tier`, `release_year`, `duration_minutes`, `poster_url` (optional), and the returned `r2_key`. |
@@ -53,5 +57,6 @@ The client uploads the video with a `PUT` to `upload_url`, using the returned `C
 ## Notes
 
 - Signup always creates a regular user; it cannot assign administrator privileges.
+- Password reset links expire after one hour, are single-use, and are limited to one email per account per minute. Tokens are stored as SHA-256 hashes.
 - Database credentials, JWT signing key, and R2 credentials are read from environment variables, never from request data.
 - Run the PHP development server only for local development. In production, use a PHP-capable web server with HTTPS and environment variables supplied by the deployment platform.

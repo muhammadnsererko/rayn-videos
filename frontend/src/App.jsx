@@ -81,6 +81,7 @@ function MovieRow({ id, title, description, movies, onPlay, showAddedDate = fals
 export default function App() {
   const [user, setUser] = useState(readStoredUser);
   const [authMode, setAuthMode] = useState('');
+  const [resetToken, setResetToken] = useState('');
   const [activeMovie, setActiveMovie] = useState(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [tier, setTier] = useState('all');
@@ -95,6 +96,19 @@ export default function App() {
   const signInFromPlayer = useCallback(() => {
     setActiveMovie(null);
     setAuthMode('login');
+  }, []);
+
+  useEffect(() => {
+    const resetTokenFromUrl = new URLSearchParams(window.location.hash.slice(1)).get('reset_token');
+    if (!resetTokenFromUrl) return;
+
+    setResetToken(resetTokenFromUrl);
+    setAuthMode('reset');
+    window.history.replaceState(
+      window.history.state,
+      '',
+      `${window.location.pathname}${window.location.search}`,
+    );
   }, []);
 
   useEffect(() => {
@@ -119,6 +133,7 @@ export default function App() {
     localStorage.setItem('rayn_user', JSON.stringify(nextUser));
     setUser(nextUser);
     setAuthMode('');
+    setResetToken('');
   }
 
   function signOut() {
@@ -330,9 +345,14 @@ export default function App() {
       {authMode && (
         <AuthDialog
           mode={authMode}
-          onClose={() => setAuthMode('')}
+          resetToken={resetToken}
+          onClose={() => {
+            setAuthMode('');
+            setResetToken('');
+          }}
           onSuccess={signInComplete}
           onSwitch={() => setAuthMode((mode) => mode === 'login' ? 'signup' : 'login')}
+          onForgotPassword={() => setAuthMode('reset-request')}
         />
       )}
       {activeMovie && (
