@@ -12,6 +12,7 @@ PHP 8.1+ JSON API for RAYN STREAM. PostgreSQL is hosted by Supabase; video uploa
 6. Create a private R2 bucket and an R2 API token with object read/write access scoped to that bucket.
 7. Promote an account to administrator from the Supabase SQL Editor after signing up: `UPDATE users SET role = 'admin' WHERE email = lower('admin@example.com');`
 8. For password resets, apply [`database/add-password-reset-tokens.sql`](database/add-password-reset-tokens.sql) to an existing database (or use the updated schema for a new database), then configure the Resend variables below. Resend's free transactional tier requires a sending domain that you own and verify.
+9. To enable landscape hero artwork on an existing database, run [`database/add-movie-backdrop-url.sql`](database/add-movie-backdrop-url.sql) in the Supabase SQL Editor. New databases get the column from [`database/schema.sql`](database/schema.sql). Existing movies remain valid with a `NULL` backdrop; the homepage uses their poster as a darkened fallback.
 
 For local development, export `.env` values into the PHP server process and serve the workspace root:
 
@@ -48,9 +49,9 @@ All request and response bodies are JSON. Protected endpoints accept `Authorizat
 | POST | `/api/auth/login.php` | Public | Authenticate with `email` and `password`; returns `token` and `user`. |
 | POST | `/api/auth/password-reset-request.php` | Public | Request a one-time password reset link; response does not disclose whether the email is registered. |
 | POST | `/api/auth/password-reset-complete.php` | Public | Set a new password with the reset token and new password. |
-| GET | `/api/movies.php?tier=all\|free\|vip` | Public | List movies. The `r2_key` is never included in list responses. |
+| GET | `/api/movies.php?tier=all\|free\|vip` | Public | List movies with optional `poster_url` (portrait) and `backdrop_url` (landscape) artwork. The `r2_key` is never included in list responses. |
 | POST | `/api/upload/presign.php` | Admin | Create a video upload URL with `content_type` (`video/mp4`, `video/webm`, or `video/quicktime`). Returns `upload_url`, `r2_key`, and the required `Content-Type` header. |
-| POST | `/api/movies/create.php` | Admin | Save metadata after the upload, with `title`, `description`, `tier`, `release_year`, `duration_minutes`, `poster_url` (optional), and the returned `r2_key`. |
+| POST | `/api/movies/create.php` | Admin | Save metadata after the upload, with `title`, `description`, `tier`, `release_year`, `duration_minutes`, `poster_url` and `backdrop_url` (both optional), and the returned `r2_key`. |
 
 The client uploads the video with a `PUT` to `upload_url`, using the returned `Content-Type` header. The URL expires after 15 minutes. Movie creation verifies that the R2 object exists before saving metadata. Keep the bucket private; these endpoints do not expose playback URLs.
 

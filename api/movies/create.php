@@ -12,6 +12,7 @@ $tier = strtolower(trim((string) ($input['tier'] ?? '')));
 $releaseYear = filter_var($input['release_year'] ?? null, FILTER_VALIDATE_INT);
 $durationMinutes = filter_var($input['duration_minutes'] ?? null, FILTER_VALIDATE_INT);
 $posterUrl = trim((string) ($input['poster_url'] ?? ''));
+$backdropUrl = trim((string) ($input['backdrop_url'] ?? ''));
 $r2Key = (string) ($input['r2_key'] ?? '');
 
 if ($title === '' || strlen($title) > 255) {
@@ -32,6 +33,9 @@ if ($durationMinutes === false || $durationMinutes < 1 || $durationMinutes > 100
 if ($posterUrl !== '' && (!filter_var($posterUrl, FILTER_VALIDATE_URL) || parse_url($posterUrl, PHP_URL_SCHEME) !== 'https')) {
     json_response(['error' => 'poster_url must be a valid HTTPS URL.'], 422);
 }
+if ($backdropUrl !== '' && (strlen($backdropUrl) > 2048 || !filter_var($backdropUrl, FILTER_VALIDATE_URL) || parse_url($backdropUrl, PHP_URL_SCHEME) !== 'https')) {
+    json_response(['error' => 'backdrop_url must be a valid HTTPS URL no longer than 2048 characters.'], 422);
+}
 if (!preg_match('#^uploads/[a-f0-9]{32}\.(mp4|webm|mov)$#', $r2Key)) {
     json_response(['error' => 'r2_key must come from the upload presign endpoint.'], 422);
 }
@@ -45,9 +49,9 @@ try {
 
 try {
     $statement = database()->prepare(
-        'INSERT INTO movies (title, description, tier, release_year, duration_minutes, poster_url, r2_key) '
-        . 'VALUES (:title, :description, :tier, :release_year, :duration_minutes, :poster_url, :r2_key) '
-        . 'RETURNING id, title, description, tier, release_year, duration_minutes, poster_url, created_at'
+        'INSERT INTO movies (title, description, tier, release_year, duration_minutes, poster_url, backdrop_url, r2_key) '
+        . 'VALUES (:title, :description, :tier, :release_year, :duration_minutes, :poster_url, :backdrop_url, :r2_key) '
+        . 'RETURNING id, title, description, tier, release_year, duration_minutes, poster_url, backdrop_url, created_at'
     );
     $statement->execute([
         'title' => $title,
@@ -56,6 +60,7 @@ try {
         'release_year' => $releaseYear,
         'duration_minutes' => $durationMinutes,
         'poster_url' => $posterUrl !== '' ? $posterUrl : null,
+        'backdrop_url' => $backdropUrl !== '' ? $backdropUrl : null,
         'r2_key' => $r2Key,
     ]);
 } catch (PDOException $exception) {

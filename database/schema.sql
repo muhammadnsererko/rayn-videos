@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS movies (
     release_year SMALLINT NOT NULL CHECK (release_year >= 1888),
     duration_minutes SMALLINT NOT NULL CHECK (duration_minutes BETWEEN 1 AND 1000),
     poster_url TEXT,
+    backdrop_url TEXT,
     r2_key TEXT NOT NULL UNIQUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

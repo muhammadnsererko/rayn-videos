@@ -50,6 +50,7 @@ export default function UploadDialog({ onClose, onCreated }) {
         release_year: Number(form.get('release_year')),
         duration_minutes: Number(form.get('duration_minutes')),
         poster_url: form.get('poster_url') || '',
+        backdrop_url: form.get('backdrop_url') || '',
         r2_key: upload.r2_key,
       });
       onCreated(data.movie);
@@ -99,6 +100,10 @@ export default function UploadDialog({ onClose, onCreated }) {
           <label>
             Poster image URL <span className="optional-label">Optional, HTTPS</span>
             <input name="poster_url" type="url" placeholder="https://…" />
+          </label>
+          <label>
+            Backdrop image URL <span className="optional-label">Optional, HTTPS landscape artwork</span>
+            <input name="backdrop_url" type="url" placeholder="https://…" />
           </label>
           <label className="file-picker">
             <Film size={19} />

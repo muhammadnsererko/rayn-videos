@@ -9,7 +9,7 @@ if (!in_array($tier, ['all', 'free', 'vip'], true)) {
     json_response(['error' => 'Tier must be all, free, or vip.'], 422);
 }
 
-$sql = 'SELECT id, title, description, tier, release_year, duration_minutes, poster_url, created_at FROM movies';
+$sql = 'SELECT id, title, description, tier, release_year, duration_minutes, poster_url, backdrop_url, created_at FROM movies';
 if ($tier !== 'all') {
     $sql .= ' WHERE tier = :tier';
 }

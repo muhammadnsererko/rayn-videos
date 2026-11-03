@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Clapperboard, LogIn, LogOut, Play, Plus, Search, ShieldCheck } from 'lucide-react';
 import AuthDialog from './components/AuthDialog';
+import MovieDetailsDialog from './components/MovieDetailsDialog';
 import PlayerDialog from './components/PlayerDialog';
 import UploadDialog from './components/UploadDialog';
 import api, { apiErrorMessage } from './services/api';
@@ -83,6 +84,7 @@ export default function App() {
   const [authMode, setAuthMode] = useState('');
   const [resetToken, setResetToken] = useState('');
   const [activeMovie, setActiveMovie] = useState(null);
+  const [infoMovie, setInfoMovie] = useState(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [tier, setTier] = useState('all');
   const [search, setSearch] = useState('');
@@ -149,8 +151,10 @@ export default function App() {
 
   const sortedMovies = sortByCreatedAt(movies);
   const featuredMovie = sortedMovies[0];
-  const popularPicks = sortedMovies.slice(0, 8);
+  const trendingSelection = sortedMovies.slice(0, 8);
   const recentlyAdded = sortedMovies.slice(0, 8);
+  const heroImage = featuredMovie?.backdrop_url || featuredMovie?.poster_url;
+  const usesPosterBackdrop = !featuredMovie?.backdrop_url && Boolean(featuredMovie?.poster_url);
   const normalizedSearch = search.trim().toLowerCase();
   const visibleMovies = sortedMovies.filter((movie) => (
     (tier === 'all' || movie.tier === tier)
@@ -195,12 +199,18 @@ export default function App() {
 
       <main id="top">
         <section
-          className={`hero-section ${featuredMovie?.poster_url ? 'hero-has-art' : ''}`}
+          className={`hero-section ${heroImage ? 'hero-has-image' : ''}`}
           aria-labelledby={loading ? undefined : 'hero-title'}
           aria-label={loading ? 'Featured film' : undefined}
         >
-          {featuredMovie?.poster_url && (
-            <img className="hero-art" src={featuredMovie.poster_url} alt="" fetchPriority="high" />
+          {heroImage && (
+            <img
+              className={`hero-backdrop ${usesPosterBackdrop ? 'hero-backdrop-poster' : ''}`}
+              src={heroImage}
+              alt=""
+              fetchPriority="high"
+              onError={(event) => { event.currentTarget.hidden = true; }}
+            />
           )}
           <div className="hero-shade" aria-hidden="true" />
           <div className="hero-content">
@@ -212,12 +222,14 @@ export default function App() {
               </div>
             ) : featuredMovie ? (
               <>
-                <span className="hero-label">FEATURED FILM</span>
+                <div className="hero-kicker">
+                  <span className="hero-label">FEATURED FILM</span>
+                  <span className={`tier-tag tier-${featuredMovie.tier}`}>{featuredMovie.tier}</span>
+                </div>
                 <h1 id="hero-title">{featuredMovie.title}</h1>
                 <div className="hero-meta">
                   {featuredMovie.release_year && <span>{featuredMovie.release_year}</span>}
                   {featuredMovie.duration_minutes && <span>{featuredMovie.duration_minutes} min</span>}
-                  <span className={`tier-tag tier-${featuredMovie.tier}`}>{featuredMovie.tier}</span>
                 </div>
                 <p className="hero-description">
                   {featuredMovie.description || 'No description available for this film.'}
@@ -226,7 +238,9 @@ export default function App() {
                   <button className="button button-watch" type="button" onClick={() => setActiveMovie(featuredMovie)}>
                     <Play size={17} fill="currentColor" /> Watch now
                   </button>
-                  <a className="button button-explore" href="#collection">Explore collection</a>
+                  <button className="button button-explore" type="button" onClick={() => setInfoMovie(featuredMovie)}>
+                    More info
+                  </button>
                 </div>
               </>
             ) : error ? (
@@ -254,9 +268,9 @@ export default function App() {
           <>
             <MovieRow
               id="popular-picks"
-              title="Popular picks"
-              description="A few stories to start with."
-              movies={popularPicks}
+              title="Trending This Week"
+              description="An editorial selection from the Rayn collection."
+              movies={trendingSelection}
               onPlay={setActiveMovie}
             />
             <MovieRow
@@ -357,6 +371,16 @@ export default function App() {
       )}
       {activeMovie && (
         <PlayerDialog movie={activeMovie} onClose={closePlayer} onSignIn={signInFromPlayer} />
+      )}
+      {infoMovie && (
+        <MovieDetailsDialog
+          movie={infoMovie}
+          onClose={() => setInfoMovie(null)}
+          onPlay={() => {
+            setActiveMovie(infoMovie);
+            setInfoMovie(null);
+          }}
+        />
       )}
       {uploadOpen && <UploadDialog onClose={() => setUploadOpen(false)} onCreated={addMovie} />}
     </div>
