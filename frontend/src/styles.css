@@ -66,7 +66,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 main { width: 100%; }
 .hero-section {
   position: relative;
-  min-height: clamp(620px, 64vw, 800px);
+  min-height: clamp(500px, 49vw, 640px);
   display: flex;
   align-items: center;
   overflow: hidden;
@@ -75,9 +75,9 @@ main { width: 100%; }
   border-bottom: 1px solid rgba(214,173,112,.14);
   background: radial-gradient(ellipse at 76% 45%, #30271d 0, #1d1915 30%, #101011 70%);
 }
-.hero-art { position: absolute; z-index: -2; top: 50%; right: clamp(0px, 5vw, 88px); width: min(46vw, 650px); height: 92%; max-width: none; object-fit: contain; object-position: right center; opacity: .96; filter: drop-shadow(0 16px 48px rgba(0,0,0,.4)) saturate(.88); transform: translateY(-50%); }
-.hero-shade { position: absolute; z-index: -1; inset: 0; background: linear-gradient(90deg, #0c0c0d 0%, rgba(12,12,13,.98) 24%, rgba(12,12,13,.84) 43%, rgba(12,12,13,.34) 68%, rgba(12,12,13,.08) 100%), linear-gradient(0deg, #0c0c0d 0%, rgba(12,12,13,.42) 16%, transparent 48%, rgba(12,12,13,.18) 100%); }
-.hero-content { position: relative; z-index: 1; width: min(40vw, 620px); }
+.hero-art { position: absolute; z-index: -2; top: 50%; right: clamp(0px, 4vw, 64px); width: min(58vw, 780px); height: 100%; max-width: none; object-fit: contain; object-position: right center; opacity: .96; filter: drop-shadow(0 16px 48px rgba(0,0,0,.4)) saturate(.88); transform: translateY(-50%); }
+.hero-shade { position: absolute; z-index: -1; inset: 0; background: linear-gradient(90deg, #0c0c0d 0%, rgba(12,12,13,.98) 27%, rgba(12,12,13,.84) 47%, rgba(12,12,13,.38) 72%, rgba(12,12,13,.12) 100%), linear-gradient(0deg, #0c0c0d 0%, rgba(12,12,13,.42) 14%, transparent 46%, rgba(12,12,13,.18) 100%); }
+.hero-content { position: relative; z-index: 1; width: min(43vw, 590px); }
 .eyebrow, .state-kicker { display: inline-flex; align-items: center; gap: 9px; color: #c5bba9; font: 10px var(--mono); letter-spacing: .12em; }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--acid); box-shadow: 0 0 12px rgba(214,173,112,.45); }
 .hero-label { display: block; margin-top: 24px; color: var(--acid); font: 10px var(--mono); letter-spacing: .18em; }
@@ -189,8 +189,8 @@ main { width: 100%; }
   .account-actions { gap: 9px; }
   .user-name { display: none; }
   .button-admin, .button-quiet { min-height: 34px; padding: 0 10px; }
-  .hero-section { min-height: clamp(620px, 155vw, 720px); align-items: end; padding: 66px 24px 72px; }
-  .hero-art { top: 0; right: -12px; width: min(84vw, 440px); height: 62%; object-fit: contain; opacity: .78; object-position: right top; transform: none; }
+  .hero-section { min-height: clamp(560px, 138vw, 680px); align-items: end; padding: 66px 24px 72px; }
+  .hero-art { top: 0; right: -12px; width: min(96vw, 480px); height: 66%; object-fit: contain; opacity: .78; object-position: right top; transform: none; }
   .hero-shade { background: linear-gradient(0deg, #0c0c0d 0%, rgba(12,12,13,.94) 30%, rgba(12,12,13,.66) 49%, rgba(12,12,13,.24) 72%, rgba(12,12,13,.08) 100%), linear-gradient(90deg, rgba(12,12,13,.36), transparent 76%); }
   .hero-content { position: relative; z-index: 1; width: 100%; max-width: 560px; }
   .hero-label { margin-top: 22px; }
