@@ -31,7 +31,7 @@ Deploy the repository root as a Docker web service. The Docker image uses PHP 8.
 
 Set these variables in the Render service environment:
 
-- `DB_HOST`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` for Supabase PostgreSQL (`DB_PORT` is optional and defaults to `5432`).
+- `DB_HOST`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` for Supabase PostgreSQL (`DB_PORT` is optional and defaults to `5432`; `DB_SSLMODE` defaults to `require`).
 - `JWT_SECRET` and, optionally, `JWT_ISSUER`.
 - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET` for the private Cloudflare R2 bucket.
 - `CORS_ALLOWED_ORIGINS` as a comma-separated list of exact deployed frontend origins.
@@ -50,10 +50,13 @@ All request and response bodies are JSON. Protected endpoints accept `Authorizat
 | POST | `/api/auth/password-reset-request.php` | Public | Request a one-time password reset link; response does not disclose whether the email is registered. |
 | POST | `/api/auth/password-reset-complete.php` | Public | Set a new password with the reset token and new password. |
 | GET | `/api/movies.php?tier=all\|free\|vip` | Public | List movies with optional `poster_url` (portrait) and `backdrop_url` (landscape) artwork. The `r2_key` is never included in list responses. |
-| POST | `/api/upload/presign.php` | Admin | Create a video upload URL with `content_type` (`video/mp4`, `video/webm`, or `video/quicktime`). Returns `upload_url`, `r2_key`, and the required `Content-Type` header. |
+| POST | `/api/upload/presign.php` | Admin | Without `file_size_bytes`, preserves the existing single-PUT response. With a size, selects single PUT or multipart and returns its mode and upload details. |
+| POST | `/api/upload/multipart/part.php` | Admin | Presign one `UploadPart` request using `r2_key`, `upload_id`, and `part_number`. |
+| POST | `/api/upload/multipart/complete.php` | Admin | Complete multipart upload from ordered `{part_number, etag}` entries; verifies nonzero object size and configured maximum. |
+| POST | `/api/upload/multipart/abort.php` | Admin | Abort an incomplete multipart upload using `r2_key` and `upload_id`. |
 | POST | `/api/movies/create.php` | Admin | Save metadata after the upload, with `title`, `description`, `tier`, `release_year`, `duration_minutes`, `poster_url` and `backdrop_url` (both optional), and the returned `r2_key`. |
 
-The client uploads the video with a `PUT` to `upload_url`, using the returned `Content-Type` header. The URL expires after 15 minutes. Movie creation verifies that the R2 object exists before saving metadata. Keep the bucket private; these endpoints do not expose playback URLs.
+Single-PUT URLs expire after 15 minutes and retain the existing `Content-Type` header contract. Multipart part URLs also expire after 15 minutes. The browser uploads bytes directly to R2; movie bytes never pass through PHP. Both multipart completion and movie creation verify the R2 object. The bucket remains private.
 
 ## Notes
 
@@ -61,3 +64,68 @@ The client uploads the video with a `PUT` to `upload_url`, using the returned `C
 - Password reset links expire after one hour, are single-use, and are limited to one email per account per minute. Tokens are stored as SHA-256 hashes.
 - Database credentials, JWT signing key, and R2 credentials are read from environment variables, never from request data.
 - Run the PHP development server only for local development. In production, use a PHP-capable web server with HTTPS and environment variables supplied by the deployment platform.
+
+## Video Encoding And Upload
+
+Encoding runs on an admin workstation, not on Render or in the browser. Install FFmpeg and FFprobe first:
+
+```sh
+# Ubuntu/Debian
+sudo apt-get update && sudo apt-get install -y ffmpeg
+
+# macOS with Homebrew
+brew install ffmpeg
+```
+
+Encode a source to a new MP4; the original is never overwritten:
+
+```sh
+python3 tools/video_pipeline/encode.py \
+	--input movie.mkv \
+	--output processed/movie.mp4 \
+	--config tools/video_pipeline/profile.example.json
+```
+
+The initial profile caps dimensions at 1280x720 without upscaling, preserves aspect ratio, caps frame rate at 30 fps, and uses two-pass `libx264`, `yuv420p`, AAC at 96 kbps when audio exists, and `+faststart`. Video bitrate defaults to 610 kbps (the minimum profile is 600 kbps); edit the JSON profile or use CLI overrides to tune it. Pass logs and partial output are temporary and removed on success, failure, or interruption. Encoded files belong in ignored `processed/`, not Git.
+
+The utility prints a JSON report containing source/output codecs, dimensions, duration, frame rate, file sizes, compression percentage, and size-budget estimates. It warns if the configured bitrate is estimated to exceed the size budget or if the minimum configured profile cannot fit. After encoding and decode validation, it checks the actual output size; an oversized result prints a report with `passed: false`, exits with status 2, and is not published to the requested output path. Encoding/validation failures use a separate status and message. It never silently lowers bitrate. The encoder profile's size budget is separate from the 1,000,000,000-byte upload maximum. Around 667 MB for two hours allows only about 741 kbps total before container overhead; the example 610 kbps video plus 96 kbps audio and 4.5% overhead is close to that encoding budget. This is aggressive for many 720p sources; review every result visually and raise the bitrate or budget when quality is inadequate. The tool reports the conflict instead of promising both outcomes.
+
+In the admin interface, select the processed `.mp4`, enter metadata, and publish. Files above the 1,000,000,000-byte maximum are rejected before upload; the API enforces the same limit on the declared size and the actual R2 object. Files below the configured multipart threshold use the existing direct single-PUT flow. Larger files use parallel direct-to-R2 multipart parts with bounded retries; the API presigns each part, the browser reads its `ETag`, and the API completes and checks the object before the catalog registration request. Cancellation aborts the multipart session. Registration repeats the size check before inserting a movie row.
+
+### Upload Configuration
+
+Set these Render environment variables (safe defaults are also in `.env.example`):
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `VIDEO_MAX_UPLOAD_BYTES` | `1000000000` | Maximum declared and completed movie object size (1,000,000,000 bytes). |
+| `R2_MULTIPART_THRESHOLD_BYTES` | `67108864` | At or above this size, an MP4 uses multipart upload. |
+| `R2_MULTIPART_PART_SIZE_BYTES` | `16777216` | Part size; minimum is 5 MiB, and the final part may be smaller. |
+
+For local disposable PostgreSQL tests only, `DB_SSLMODE=disable` may be used if the local server does not offer TLS. Keep `require` for Supabase/production. `R2_ENDPOINT` and `R2_PATH_STYLE_ENDPOINT` are optional local S3-compatible test overrides; leave them unset for Cloudflare R2.
+
+Keep the existing `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET` variables backend-only. The R2 token needs object read/write/delete permissions for the private bucket. The API needs read permission for `HeadObject`, write permission for multipart operations, and delete permission to remove a completed object that fails size verification.
+
+Configure the R2 bucket CORS policy for the exact deployed frontend origins. Browser part PUTs need `AllowedMethods: ["PUT"]`, `AllowedHeaders` including `content-type` (or `*`), and `ExposeHeaders: ["ETag"]`; expose `ETag` so the client can send the part list to the completion API. Set `MaxAgeSeconds` to a reasonable cache duration. Do not make the bucket public. Add an R2 lifecycle rule to abort incomplete multipart uploads after one day so browser closures or lost initiation responses do not retain billable parts indefinitely.
+
+### Troubleshooting
+
+- `FFmpeg executable not found`: install FFmpeg/FFprobe or set `FFMPEG` and `FFPROBE` to their executable paths.
+- Output above the configured limit: the JSON report includes actual bytes, maximum bytes, and `passed: false`; the command exits with status 2 and does not publish the oversized temporary file. Review the estimate and visual quality, then adjust the profile bitrate or storage budget explicitly. The encoder does not lower quality automatically.
+- Part upload fails or completion reports a missing ETag: check R2 CORS origins, `PUT`, allowed `Content-Type`, exposed `ETag`, and network access. The client retries each failed part up to three times with a fresh URL.
+- A multipart upload remains incomplete after cancellation or a lost browser session: use the API abort action when the upload id is available and rely on the one-day bucket lifecycle rule as a backstop.
+- R2 object verification fails: confirm the bucket name, R2 token permissions, and that multipart completion finished before submitting movie metadata.
+- A movie row is not created: the admin endpoint requires a current admin JWT, a valid unique R2 key, valid metadata, and a completed non-empty object within `VIDEO_MAX_UPLOAD_BYTES`.
+
+### Tests
+
+Run the media/profile tests, fake-R2 API tests, frontend multipart tests, PHP syntax checks, and frontend production build with:
+
+```sh
+python3 -m unittest discover -s tools/video_pipeline -p 'test_*.py' -v
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+cd frontend && npm test && npm run build
+cd .. && find api -name '*.php' -print0 | xargs -0 -n1 php -l
+```
+
+The successful movie-registration API test is opt-in and uses only a disposable PostgreSQL database set through `RAYN_TEST_DB_HOST`, `RAYN_TEST_DB_PORT`, `RAYN_TEST_DB_NAME`, `RAYN_TEST_DB_USER`, and `RAYN_TEST_DB_PASSWORD`; set `RAYN_TEST_DB_SSLMODE=disable` only for a local database without TLS. The test applies the existing schema only to that database. No test points at Supabase automatically.

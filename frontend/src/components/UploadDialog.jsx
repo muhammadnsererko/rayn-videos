@@ -1,14 +1,24 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { Film, X } from 'lucide-react';
+import { Check, Film, X } from 'lucide-react';
 import api, { apiErrorMessage } from '../services/api';
+import { uploadMultipartParts, validateUploadFileSize } from '../services/multipartUpload';
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return 'Unknown size';
+  if (bytes < 1_000_000) return `${(bytes / 1_000).toFixed(1)} KB`;
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
 
 export default function UploadDialog({ onClose, onCreated }) {
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [status, setStatus] = useState('');
+  const [uploadStatus, setUploadStatus] = useState('selecting');
+  const [publishedMovie, setPublishedMovie] = useState(null);
+  const [completedUpload, setCompletedUpload] = useState(null);
   const [error, setError] = useState('');
+  const abortControllerRef = useRef(null);
 
   useEffect(() => {
     function closeOnEscape(event) {
@@ -25,24 +35,106 @@ export default function UploadDialog({ onClose, onCreated }) {
       setError('Choose a video file first.');
       return;
     }
+    try {
+      validateUploadFileSize(file.size);
+    } catch (sizeError) {
+      setError(sizeError.message);
+      return;
+    }
+    if (file.type && file.type !== 'video/mp4') {
+      setError('Select the compressed MP4 produced by the Rayn video pipeline.');
+      return;
+    }
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     setBusy(true);
     setError('');
-    setProgress(0);
+    const retryUpload = completedUpload?.file === file ? completedUpload : null;
+    let upload = retryUpload ? { r2_key: retryUpload.r2_key } : null;
+    setProgress(upload ? 100 : 0);
+    setUploadStatus(upload ? 'registering' : 'preparing');
+    let multipartUpload = retryUpload?.multipartUpload ?? null;
+    let multipartParts = retryUpload?.parts ?? null;
+    let completionPending = Boolean(retryUpload?.completionPending);
+    let uploadCompleted = Boolean(upload && !completionPending);
+    let completionAttempted = false;
+    let cleanupError = '';
 
     try {
-      setStatus('Preparing secure upload…');
-      const { data: upload } = await api.post('/upload/presign.php', { content_type: file.type });
+      if (!upload) {
+        const { data: presign } = await api.post('/upload/presign.php', {
+          content_type: 'video/mp4',
+          file_size_bytes: file.size,
+        }, { signal: controller.signal });
+        upload = presign;
 
-      setStatus('Uploading video to storage…');
-      await axios.put(upload.upload_url, file, {
-        headers: upload.required_headers,
-        onUploadProgress: (event) => {
-          if (event.total) setProgress(Math.round((event.loaded * 100) / event.total));
-        },
-      });
+        if (upload.mode === 'multipart') {
+          multipartUpload = { r2_key: upload.r2_key, upload_id: upload.upload_id };
+          setUploadStatus('uploading');
+          const parts = await uploadMultipartParts({
+            file,
+            r2Key: upload.r2_key,
+            uploadId: upload.upload_id,
+            partSizeBytes: upload.part_size_bytes,
+            signal: controller.signal,
+            onProgress: ({ percent }) => setProgress(percent),
+            requestPartUrl: async ({ r2_key, upload_id, part_number, signal }) => {
+              const { data } = await api.post('/upload/multipart/part.php', {
+                r2_key,
+                upload_id,
+                part_number,
+              }, { signal });
+              return data;
+            },
+            putPart: (url, chunk, options) => axios.put(url, chunk, {
+              signal: options.signal,
+              headers: { 'Content-Type': 'application/octet-stream' },
+              onUploadProgress: options.onUploadProgress,
+            }),
+          });
 
-      setStatus('Saving movie details…');
+          multipartParts = parts;
+          completionPending = true;
+          setCompletedUpload({
+            file,
+            r2_key: upload.r2_key,
+            multipartUpload,
+            parts: multipartParts,
+            completionPending: true,
+          });
+        } else {
+          setUploadStatus('uploading');
+          await axios.put(upload.upload_url, file, {
+            headers: upload.required_headers,
+            signal: controller.signal,
+            onUploadProgress: (event) => {
+              if (event.total) setProgress(Math.round((event.loaded * 100) / event.total));
+            },
+          });
+          uploadCompleted = true;
+        }
+      }
+
+      if (multipartUpload && completionPending) {
+        setUploadStatus('completing');
+        completionAttempted = true;
+        await api.post('/upload/multipart/complete.php', {
+          ...multipartUpload,
+          parts: multipartParts,
+          expected_size_bytes: file.size,
+        }, { signal: controller.signal });
+        uploadCompleted = true;
+        completionPending = false;
+      }
+
+      if (uploadCompleted) {
+        setCompletedUpload({ file, r2_key: upload.r2_key });
+        setProgress(100);
+        setUploadStatus('uploaded');
+      }
+
+      setUploadStatus('registering');
       const { data } = await api.post('/movies/create.php', {
         title: form.get('title'),
         description: form.get('description'),
@@ -51,16 +143,52 @@ export default function UploadDialog({ onClose, onCreated }) {
         duration_minutes: Number(form.get('duration_minutes')),
         poster_url: form.get('poster_url') || '',
         backdrop_url: form.get('backdrop_url') || '',
+        file_size_bytes: file.size,
         r2_key: upload.r2_key,
-      });
-      onCreated(data.movie);
+      }, { signal: controller.signal });
+      setCompletedUpload(null);
+      setPublishedMovie(data.movie);
+      setUploadStatus('published');
     } catch (requestError) {
-      setError(apiErrorMessage(requestError));
-      setStatus('');
+      if (multipartUpload && !uploadCompleted && !completionAttempted) {
+        try {
+          await api.post('/upload/multipart/abort.php', multipartUpload);
+        } catch (abortError) {
+          cleanupError = ` Incomplete-upload cleanup also failed: ${apiErrorMessage(abortError)}`;
+        }
+      }
+      if (controller.signal.aborted || axios.isCancel(requestError) || requestError.name === 'AbortError') {
+        setUploadStatus('cancelled');
+        const cleanupMessage = cleanupError || (multipartUpload ? ' Incomplete multipart parts were aborted.' : '');
+        setError(`Upload cancelled.${cleanupMessage}`);
+      } else {
+        setUploadStatus('failed');
+        setError(`${apiErrorMessage(requestError)}${cleanupError}`);
+      }
     } finally {
       setBusy(false);
+      abortControllerRef.current = null;
     }
   }
+
+  function cancelUpload() {
+    setUploadStatus('cancelling');
+    abortControllerRef.current?.abort();
+  }
+
+  const cancelable = busy && uploadStatus === 'uploading';
+  const statusLabels = {
+    selecting: 'Select compressed MP4',
+    preparing: 'Preparing secure upload',
+    uploading: 'Uploading to private storage',
+    completing: 'Completing multipart upload',
+    uploaded: 'Upload completed',
+    registering: 'Registering movie',
+    published: 'Movie successfully published',
+    cancelling: 'Cancelling and cleaning up',
+    cancelled: 'Upload cancelled',
+    failed: 'Upload failed',
+  };
 
   return (
     <div className="overlay" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
@@ -70,8 +198,18 @@ export default function UploadDialog({ onClose, onCreated }) {
         </button>
         <span className="eyebrow">LIBRARY MANAGEMENT</span>
         <h2 id="upload-title">Add a film</h2>
-        <p className="dialog-copy">Video uploads go directly to your private storage bucket.</p>
-        <form className="form-stack" onSubmit={submit}>
+        <p className="dialog-copy">Select the MP4 encoded with the Rayn video pipeline. Large files upload in retryable parts directly to private storage.</p>
+        {publishedMovie ? (
+          <div className="upload-result" role="status" aria-live="polite">
+            <span className="upload-result-icon"><Check size={19} /></span>
+            <span className="eyebrow">{statusLabels.published}</span>
+            <h3>{publishedMovie.title}</h3>
+            <p>{file?.name} · {formatBytes(file?.size)}</p>
+            <button className="button button-primary form-submit" type="button" onClick={() => onCreated(publishedMovie)}>
+              Done
+            </button>
+          </div>
+        ) : <form className="form-stack" onSubmit={submit}>
           <label>
             Title
             <input name="title" maxLength="255" required />
@@ -107,25 +245,37 @@ export default function UploadDialog({ onClose, onCreated }) {
           </label>
           <label className="file-picker">
             <Film size={19} />
-            <span>{file ? file.name : 'Choose video file'}</span>
+            <span>{file ? `${file.name} · ${formatBytes(file.size)}` : 'Select compressed MP4'}</span>
             <input
-              accept="video/mp4,video/webm,video/quicktime"
+              accept=".mp4,video/mp4"
               type="file"
               required
-              onChange={(event) => setFile(event.target.files?.[0] || null)}
+              disabled={busy}
+              onChange={(event) => {
+                setFile(event.target.files?.[0] || null);
+                setCompletedUpload(null);
+                setUploadStatus('selecting');
+                setProgress(0);
+                setError('');
+              }}
             />
           </label>
-          {busy && (
-            <div className="upload-status" aria-live="polite">
-              <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
-              <span>{status}{status.startsWith('Uploading') ? ` ${progress}%` : ''}</span>
+          {uploadStatus !== 'selecting' && (
+            <div className={`upload-status upload-status-${uploadStatus}`} aria-live="polite">
+              <span>{statusLabels[uploadStatus]}{uploadStatus === 'uploading' ? ` · ${progress}%` : ''}</span>
+              {uploadStatus === 'registering' && <span className="upload-complete-note">Upload completed</span>}
+              {(uploadStatus === 'uploading' || uploadStatus === 'uploaded' || uploadStatus === 'registering') && (
+                <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
+              )}
             </div>
           )}
           {error && <p className="form-error" role="alert">{error}</p>}
+          {cancelable && <button className="button button-upload-cancel form-submit" type="button" onClick={cancelUpload}>Cancel upload</button>}
+          {uploadStatus === 'cancelling' && <button className="button button-upload-cancel form-submit" type="button" disabled>Cancelling…</button>}
           <button className="button button-primary form-submit" type="submit" disabled={busy}>
-            {busy ? 'Working…' : 'Upload and publish'}
+            {busy ? 'Working…' : completedUpload?.file === file ? completedUpload.completionPending ? 'Retry completion' : 'Retry registration' : uploadStatus === 'failed' || uploadStatus === 'cancelled' ? 'Try upload again' : 'Upload and publish'}
           </button>
-        </form>
+        </form>}
       </section>
     </div>
   );

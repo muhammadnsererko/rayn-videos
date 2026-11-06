@@ -99,6 +99,51 @@ function json_response(array $payload, int $status = 200): never
     exit;
 }
 
+function positive_env_int(string $name, int $default): int
+{
+    $value = env_value($name);
+    $validatedValue = filter_var($value ?? (string) $default, FILTER_VALIDATE_INT);
+    if ($validatedValue === false || $validatedValue < 1) {
+        error_log($name . ' must be a positive integer.');
+        json_response(['error' => 'The API is not configured correctly: ' . $name . ' must be a positive integer.'], 500);
+    }
+
+    return $validatedValue;
+}
+
+function video_max_upload_bytes(): int
+{
+    return positive_env_int('VIDEO_MAX_UPLOAD_BYTES', 1000000000);
+}
+
+function r2_multipart_threshold_bytes(): int
+{
+    return positive_env_int('R2_MULTIPART_THRESHOLD_BYTES', 67108864);
+}
+
+function r2_multipart_part_size_bytes(): int
+{
+    return positive_env_int('R2_MULTIPART_PART_SIZE_BYTES', 16777216);
+}
+
+function validated_upload_key(mixed $value): string
+{
+    if (!is_string($value) || !preg_match('#\Auploads/[a-f0-9]{32}\.(?:mp4|webm|mov)\z#', $value)) {
+        json_response(['error' => 'Invalid upload key.'], 422);
+    }
+
+    return $value;
+}
+
+function validated_multipart_upload_id(mixed $value): string
+{
+    if (!is_string($value) || $value === '' || strlen($value) > 4096 || preg_match('/[\x00-\x1F\x7F]/', $value)) {
+        json_response(['error' => 'Invalid multipart upload ID.'], 422);
+    }
+
+    return $value;
+}
+
 set_exception_handler(static function (Throwable $exception): void {
     error_log('Unhandled API exception: ' . $exception->getMessage());
     json_response(['error' => 'An unexpected server error occurred.'], 500);
@@ -222,10 +267,18 @@ function require_admin(): object
 
 function r2_client(): S3Client
 {
+    $endpoint = env_value('R2_ENDPOINT');
+    $pathStyleEndpoint = env_value('R2_PATH_STYLE_ENDPOINT');
+
     return new S3Client([
         'version' => 'latest',
         'region' => 'auto',
-        'endpoint' => 'https://' . required_env('R2_ACCOUNT_ID') . '.r2.cloudflarestorage.com',
+        'endpoint' => $endpoint !== null && $endpoint !== ''
+            ? $endpoint
+            : 'https://' . required_env('R2_ACCOUNT_ID') . '.r2.cloudflarestorage.com',
+        'use_path_style_endpoint' => $pathStyleEndpoint === null
+            ? false
+            : filter_var($pathStyleEndpoint, FILTER_VALIDATE_BOOLEAN),
         'credentials' => [
             'key' => required_env('R2_ACCESS_KEY_ID'),
             'secret' => required_env('R2_SECRET_ACCESS_KEY'),

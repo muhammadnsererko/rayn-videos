@@ -167,6 +167,7 @@ main { width: 100%; }
 .file-picker { min-height: 48px; display: flex !important; flex-direction: row !important; align-items: center; gap: 10px !important; padding: 0 12px; border: 1px dashed #665642; color: var(--acid) !important; cursor: pointer; }
 .file-picker span { max-width: calc(100% - 35px); overflow: hidden; color: #d7d2c8; text-overflow: ellipsis; white-space: nowrap; }
 .file-picker input { display: none; }
+.file-picker input:disabled { cursor: wait; }
 .form-submit { width: 100%; min-height: 44px; margin-top: 2px; }
 .form-error { margin: 0; color: #ff9a79; font-size: 11px; line-height: 1.5; }
 .form-success { margin: 0; color: var(--acid); font-size: 11px; line-height: 1.5; }
@@ -174,6 +175,15 @@ main { width: 100%; }
 .switch-auth { margin: 20px 0 0; color: var(--muted); font-size: 11px; text-align: center; }
 .text-button { padding: 0; border: 0; background: none; color: var(--acid); cursor: pointer; font-size: inherit; }
 .upload-status { display: flex; flex-direction: column; gap: 8px; color: #b8b2a7; font: 10px var(--mono); }
+.upload-status-uploaded, .upload-status-published { color: var(--acid); }
+.upload-complete-note { color: var(--acid); }
+.button-upload-cancel { border-color: rgba(232,154,112,.42); background: rgba(232,154,112,.08); color: #e8a181; }
+.button-upload-cancel:hover:not(:disabled) { border-color: #e89a70; background: rgba(232,154,112,.14); }
+.upload-result { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding-top: 12px; }
+.upload-result-icon { width: 40px; height: 40px; display: grid; place-items: center; border: 1px solid rgba(214,173,112,.42); color: var(--acid); }
+.upload-result h3, .upload-result p { max-width: 100%; margin: 0; overflow-wrap: anywhere; }
+.upload-result h3 { color: var(--paper); font-size: 18px; font-weight: 500; }
+.upload-result p { color: var(--muted); font: 10px var(--mono); }
 .progress-track { height: 3px; overflow: hidden; background: #393731; }
 .progress-track span { height: 100%; display: block; background: var(--acid); transition: width .2s ease; }
 

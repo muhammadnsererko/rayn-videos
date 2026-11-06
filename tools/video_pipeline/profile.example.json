@@ -1,0 +1,11 @@
+{
+  "target_width": 1280,
+  "target_height": 720,
+  "video_bitrate_kbps": 610,
+  "minimum_video_bitrate_kbps": 600,
+  "audio_bitrate_kbps": 96,
+  "maximum_frame_rate": 30,
+  "maximum_output_size_mb": 667,
+  "overhead_allowance_percent": 4.5,
+  "preset": "medium"
+}
