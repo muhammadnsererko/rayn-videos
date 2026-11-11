@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { Check, Film, X } from 'lucide-react';
+import { Check, Film, Image, X } from 'lucide-react';
 import api, { apiErrorMessage } from '../services/api';
 import { uploadMultipartParts, validateUploadFileSize } from '../services/multipartUpload';
+import { createArtworkUploadCache, uploadArtworkFile, validateArtworkFile } from '../services/artworkUpload';
+import VjManagementDialog from './VjManagementDialog';
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) return 'Unknown size';
@@ -12,6 +14,13 @@ function formatBytes(bytes) {
 
 export default function UploadDialog({ onClose, onCreated }) {
   const [file, setFile] = useState(null);
+  const [posterFile, setPosterFile] = useState(null);
+  const [backdropFile, setBackdropFile] = useState(null);
+  const [posterPreview, setPosterPreview] = useState('');
+  const [backdropPreview, setBackdropPreview] = useState('');
+  const [vjs, setVjs] = useState([]);
+  const [vjError, setVjError] = useState('');
+  const [vjManagementOpen, setVjManagementOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [uploadStatus, setUploadStatus] = useState('selecting');
@@ -19,6 +28,44 @@ export default function UploadDialog({ onClose, onCreated }) {
   const [completedUpload, setCompletedUpload] = useState(null);
   const [error, setError] = useState('');
   const abortControllerRef = useRef(null);
+  const artworkUploadCacheRef = useRef(null);
+  if (!artworkUploadCacheRef.current) {
+    artworkUploadCacheRef.current = createArtworkUploadCache();
+  }
+
+  const loadVjs = useCallback(async () => {
+    setVjError('');
+    try {
+      const { data } = await api.get('/vjs.php');
+      setVjs(data.vjs);
+    } catch (requestError) {
+      setVjError(apiErrorMessage(requestError));
+    }
+  }, []);
+
+  useEffect(() => {
+    loadVjs();
+  }, [loadVjs]);
+
+  useEffect(() => {
+    if (!posterFile) {
+      setPosterPreview('');
+      return undefined;
+    }
+    const previewUrl = URL.createObjectURL(posterFile);
+    setPosterPreview(previewUrl);
+    return () => URL.revokeObjectURL(previewUrl);
+  }, [posterFile]);
+
+  useEffect(() => {
+    if (!backdropFile) {
+      setBackdropPreview('');
+      return undefined;
+    }
+    const previewUrl = URL.createObjectURL(backdropFile);
+    setBackdropPreview(previewUrl);
+    return () => URL.revokeObjectURL(previewUrl);
+  }, [backdropFile]);
 
   useEffect(() => {
     function closeOnEscape(event) {
@@ -35,8 +82,14 @@ export default function UploadDialog({ onClose, onCreated }) {
       setError('Choose a video file first.');
       return;
     }
+    if (!form.get('vj_id')) {
+      setError('Choose the VJ who translated this movie.');
+      return;
+    }
     try {
       validateUploadFileSize(file.size);
+      validateArtworkFile(posterFile);
+      validateArtworkFile(backdropFile);
     } catch (sizeError) {
       setError(sizeError.message);
       return;
@@ -134,6 +187,21 @@ export default function UploadDialog({ onClose, onCreated }) {
         setUploadStatus('uploaded');
       }
 
+      setUploadStatus('uploading-poster');
+      const posterKey = await uploadArtworkFile(posterFile, 'poster', {
+        api,
+        signal: controller.signal,
+        cache: artworkUploadCacheRef.current,
+        putFile: (url, image, options) => axios.put(url, image, options),
+      });
+      setUploadStatus('uploading-backdrop');
+      const backdropKey = await uploadArtworkFile(backdropFile, 'backdrop', {
+        api,
+        signal: controller.signal,
+        cache: artworkUploadCacheRef.current,
+        putFile: (url, image, options) => axios.put(url, image, options),
+      });
+
       setUploadStatus('registering');
       const { data } = await api.post('/movies/create.php', {
         title: form.get('title'),
@@ -141,8 +209,9 @@ export default function UploadDialog({ onClose, onCreated }) {
         tier: form.get('tier'),
         release_year: Number(form.get('release_year')),
         duration_minutes: Number(form.get('duration_minutes')),
-        poster_url: form.get('poster_url') || '',
-        backdrop_url: form.get('backdrop_url') || '',
+        poster_key: posterKey,
+        backdrop_key: backdropKey,
+        vj_id: Number(form.get('vj_id')),
         file_size_bytes: file.size,
         r2_key: upload.r2_key,
       }, { signal: controller.signal });
@@ -159,7 +228,8 @@ export default function UploadDialog({ onClose, onCreated }) {
       }
       if (controller.signal.aborted || axios.isCancel(requestError) || requestError.name === 'AbortError') {
         setUploadStatus('cancelled');
-        const cleanupMessage = cleanupError || (multipartUpload ? ' Incomplete multipart parts were aborted.' : '');
+        const incompleteMultipartWasAborted = multipartUpload && !uploadCompleted && !completionAttempted;
+        const cleanupMessage = cleanupError || (incompleteMultipartWasAborted ? ' Incomplete multipart parts were aborted.' : '');
         setError(`Upload cancelled.${cleanupMessage}`);
       } else {
         setUploadStatus('failed');
@@ -176,11 +246,12 @@ export default function UploadDialog({ onClose, onCreated }) {
     abortControllerRef.current?.abort();
   }
 
-  const cancelable = busy && uploadStatus === 'uploading';
   const statusLabels = {
     selecting: 'Select compressed MP4',
     preparing: 'Preparing secure upload',
     uploading: 'Uploading to private storage',
+    'uploading-poster': 'Uploading poster image',
+    'uploading-backdrop': 'Uploading backdrop image',
     completing: 'Completing multipart upload',
     uploaded: 'Upload completed',
     registering: 'Registering movie',
@@ -189,6 +260,8 @@ export default function UploadDialog({ onClose, onCreated }) {
     cancelled: 'Upload cancelled',
     failed: 'Upload failed',
   };
+  const cancelableUploadStatuses = ['uploading', 'uploading-poster', 'uploading-backdrop'];
+  const canCancel = busy && cancelableUploadStatuses.includes(uploadStatus);
 
   return (
     <div className="overlay" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
@@ -236,13 +309,44 @@ export default function UploadDialog({ onClose, onCreated }) {
             <textarea name="description" maxLength="10000" rows="3" />
           </label>
           <label>
-            Poster image URL <span className="optional-label">Optional, HTTPS</span>
-            <input name="poster_url" type="url" placeholder="https://…" />
+            VJ <span className="optional-label">Required</span>
+            <select name="vj_id" defaultValue="" required disabled={busy}>
+              <option value="" disabled>{vjs.length ? 'Select the VJ' : 'No active VJs available'}</option>
+              {vjs.map((vj) => <option key={vj.id} value={vj.id}>{vj.name}</option>)}
+            </select>
+            {vjError && <span className="form-error" role="alert">{vjError}</span>}
           </label>
-          <label>
-            Backdrop image URL <span className="optional-label">Optional, HTTPS landscape artwork</span>
-            <input name="backdrop_url" type="url" placeholder="https://…" />
+          <button className="button button-quiet" type="button" disabled={busy} onClick={() => setVjManagementOpen(true)}>
+            Manage VJs
+          </button>
+          <label className="file-picker">
+            <Image size={19} />
+            <span>{posterFile ? `Poster: ${posterFile.name} · ${formatBytes(posterFile.size)}` : 'Select poster image (optional)'}</span>
+            <input
+              accept="image/jpeg,image/png,image/webp"
+              type="file"
+              disabled={busy}
+              onChange={(event) => {
+                setPosterFile(event.target.files?.[0] || null);
+                setError('');
+              }}
+            />
           </label>
+          {posterPreview && <img className="artwork-preview artwork-preview-poster" src={posterPreview} alt="Poster preview" />}
+          <label className="file-picker">
+            <Image size={19} />
+            <span>{backdropFile ? `Backdrop: ${backdropFile.name} · ${formatBytes(backdropFile.size)}` : 'Select landscape backdrop (optional)'}</span>
+            <input
+              accept="image/jpeg,image/png,image/webp"
+              type="file"
+              disabled={busy}
+              onChange={(event) => {
+                setBackdropFile(event.target.files?.[0] || null);
+                setError('');
+              }}
+            />
+          </label>
+          {backdropPreview && <img className="artwork-preview artwork-preview-backdrop" src={backdropPreview} alt="Backdrop preview" />}
           <label className="file-picker">
             <Film size={19} />
             <span>{file ? `${file.name} · ${formatBytes(file.size)}` : 'Select compressed MP4'}</span>
@@ -270,12 +374,18 @@ export default function UploadDialog({ onClose, onCreated }) {
             </div>
           )}
           {error && <p className="form-error" role="alert">{error}</p>}
-          {cancelable && <button className="button button-upload-cancel form-submit" type="button" onClick={cancelUpload}>Cancel upload</button>}
+          {canCancel && <button className="button button-upload-cancel form-submit" type="button" onClick={cancelUpload}>Cancel upload</button>}
           {uploadStatus === 'cancelling' && <button className="button button-upload-cancel form-submit" type="button" disabled>Cancelling…</button>}
           <button className="button button-primary form-submit" type="submit" disabled={busy}>
             {busy ? 'Working…' : completedUpload?.file === file ? completedUpload.completionPending ? 'Retry completion' : 'Retry registration' : uploadStatus === 'failed' || uploadStatus === 'cancelled' ? 'Try upload again' : 'Upload and publish'}
           </button>
         </form>}
+        {vjManagementOpen && (
+          <VjManagementDialog
+            onClose={() => setVjManagementOpen(false)}
+            onChanged={loadVjs}
+          />
+        )}
       </section>
     </div>
   );

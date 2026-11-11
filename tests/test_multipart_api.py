@@ -52,6 +52,7 @@ def admin_token(role="admin", subject="1"):
 class FakeR2Handler(BaseHTTPRequestHandler):
     sessions = {}
     objects = {}
+    content_types = {}
     head_size_overrides = {}
     complete_response_failures = set()
     head_failures = set()
@@ -127,6 +128,15 @@ class FakeR2Handler(BaseHTTPRequestHandler):
         ).encode()
         self.send_body(200, body)
 
+    def do_GET(self):
+        bucket, key = self.bucket_key()
+        object_id = (bucket, key)
+        data = self.objects.get(object_id)
+        if data is None:
+            self.send_body(404, b"<Error><Code>NoSuchKey</Code></Error>")
+            return
+        self.send_body(200, data, self.content_types.get(object_id, "application/octet-stream"))
+
     def do_PUT(self):
         bucket, key = self.bucket_key()
         query = parse_qs(urlparse(self.path).query)
@@ -135,6 +145,7 @@ class FakeR2Handler(BaseHTTPRequestHandler):
         if not upload_id:
             data = self.rfile.read(length)
             self.objects[(bucket, key)] = data
+            self.content_types[(bucket, key)] = self.headers.get("Content-Type", "")
             etag = '"' + hashlib.md5(data).hexdigest() + '"'
             self.send_body(200, headers={"ETag": etag})
             return
@@ -162,7 +173,7 @@ class FakeR2Handler(BaseHTTPRequestHandler):
         content_length = self.head_size_overrides.get((bucket, key), len(data))
         self.send_response(200)
         self.send_header("Content-Length", str(content_length))
-        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Type", self.content_types.get(object_id, "video/mp4"))
         self.send_header("ETag", '"complete"')
         self.end_headers()
 
@@ -174,6 +185,7 @@ class FakeR2Handler(BaseHTTPRequestHandler):
             self.sessions.pop(upload_id, None)
         else:
             self.objects.pop((bucket, key), None)
+            self.content_types.pop((bucket, key), None)
             self.head_size_overrides.pop((bucket, key), None)
         self.send_body(204, b"")
 
@@ -188,6 +200,7 @@ class MultipartApiTests(unittest.TestCase):
         cls.fake_r2_thread.start()
         FakeR2Handler.sessions = {}
         FakeR2Handler.objects = {}
+        FakeR2Handler.content_types = {}
         FakeR2Handler.head_size_overrides = {}
         FakeR2Handler.complete_response_failures = set()
         FakeR2Handler.head_failures = set()
@@ -220,6 +233,7 @@ class MultipartApiTests(unittest.TestCase):
             database_setup = subprocess.run([
                 PHP, "-r",
                 'require "api/config.php"; $db = database(); $db->exec(file_get_contents("database/schema.sql")); '
+                '$db->exec(file_get_contents("database/add-movie-artwork-and-vjs.sql")); '
                 '$db->exec("INSERT INTO users (display_name, email, password_hash, role) VALUES '
                 '(\'Rayn Test User\', \'rayn-user@example.invalid\', \'test-only\', \'user\'), '
                 '(\'Rayn Test VIP\', \'rayn-vip@example.invalid\', \'test-only\', \'vip\') '
@@ -227,9 +241,13 @@ class MultipartApiTests(unittest.TestCase):
                 'ON CONFLICT (email) DO UPDATE SET role = EXCLUDED.role"); '
                 '$ids = []; foreach ([\'rayn-user@example.invalid\', \'rayn-vip@example.invalid\', \'rayn-admin@example.invalid\'] as $email) '
                 '{$query = $db->prepare("SELECT id FROM users WHERE email = ?"); $query->execute([$email]); $ids[] = (int) $query->fetchColumn();} '
-                'echo json_encode($ids);',
+                '$db->exec("INSERT INTO vjs (name) VALUES (\'Rayn Test VJ\') ON CONFLICT DO NOTHING"); '
+                '$vjId = (int) $db->query("SELECT id FROM vjs WHERE LOWER(name) = LOWER(\'Rayn Test VJ\')")->fetchColumn(); '
+                'echo json_encode([\'users\' => $ids, \'vj\' => $vjId]);',
             ], cwd=ROOT, env=environment, check=True, capture_output=True, text=True, timeout=30)
-            cls.test_user_ids = json.loads(database_setup.stdout)
+            database_ids = json.loads(database_setup.stdout)
+            cls.test_user_ids = database_ids["users"]
+            cls.test_vj_id = database_ids["vj"]
         cls.php_server = subprocess.Popen(
             [PHP, "-S", f"127.0.0.1:{cls.api_port}", "-t", str(ROOT)],
             cwd=ROOT, env=environment, stdout=subprocess.DEVNULL,
@@ -270,6 +288,17 @@ class MultipartApiTests(unittest.TestCase):
             data=json.dumps(payload).encode(),
             headers={"Authorization": f"Bearer {token or cls.token}", "Content-Type": "application/json"},
             method="POST",
+        )
+        with urlopen(request, timeout=15) as response:
+            return response.status, json.loads(response.read())
+
+    @classmethod
+    def call_method_api(cls, path, method, payload, token=None):
+        request = Request(
+            cls.api_url + path,
+            data=json.dumps(payload).encode(),
+            headers={"Authorization": f"Bearer {token or cls.token}", "Content-Type": "application/json"},
+            method=method,
         )
         with urlopen(request, timeout=15) as response:
             return response.status, json.loads(response.read())
@@ -514,6 +543,246 @@ class MultipartApiTests(unittest.TestCase):
             "content_type": "video/mp4", "file_size_bytes": PART_SIZE + 1,
         }, 403, token=admin_token("user"))
 
+    def test_artwork_presign_validates_admin_kind_type_and_size(self):
+        self.assert_api_error("/upload/artwork-presign.php", {
+            "kind": "poster", "content_type": "image/png", "file_size_bytes": 1,
+        }, 403, token=admin_token("user"))
+        self.assert_get_api_error("/vjs.php", 401)
+        self.assert_api_error("/vjs.php", {"name": "Unauthorized VJ"}, 403, token=admin_token("user"))
+
+        for payload in (
+            {"kind": "unknown", "content_type": "image/png", "file_size_bytes": 1},
+            {"kind": "poster", "content_type": "image/gif", "file_size_bytes": 1},
+            {"kind": "poster", "content_type": "image/png", "file_size_bytes": 0},
+            {"kind": "poster", "content_type": "image/png", "file_size_bytes": "10"},
+        ):
+            with self.subTest(payload=payload):
+                self.assert_api_error("/upload/artwork-presign.php", payload, 422)
+
+        self.assert_api_error("/movies/create.php", {
+            "title": "Invalid artwork key test",
+            "description": "",
+            "tier": "free",
+            "release_year": 2026,
+            "duration_minutes": 1,
+            "vj_id": 1,
+            "file_size_bytes": 1,
+            "poster_key": "../uploads/not-generated.png",
+            "r2_key": "uploads/" + "a" * 32 + ".mp4",
+        }, 422)
+        self.assert_api_error("/upload/artwork-presign.php", {
+            "kind": "poster", "content_type": "image/png", "file_size_bytes": 5_000_001,
+        }, 413)
+
+        for kind, prefix in (("poster", "posters/"), ("backdrop", "backdrops/")):
+            status, upload = self.call_api("/upload/artwork-presign.php", {
+                "kind": kind, "content_type": "image/png", "file_size_bytes": 1,
+            })
+            self.assertEqual(status, 201)
+            self.assertTrue(upload["artwork_key"].startswith(prefix))
+            self.assertIn("Content-Type", upload["required_headers"])
+
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
+    def test_vj_management_keeps_deactivated_history_and_prevents_duplicates(self):
+        run_id = uuid.uuid4().hex[:8]
+        original_name = f"Test VJ Lifecycle {run_id}"
+        renamed_name = f"Renamed Test VJ {run_id}"
+        status, created = self.call_method_api("/vjs.php", "POST", {"name": original_name})
+        self.assertEqual(status, 201)
+        vj_id = created["vj"]["id"]
+
+        payload = b"vj-history-test-movie"
+        _, video = self.call_api("/upload/presign.php", {
+            "content_type": "video/mp4", "file_size_bytes": len(payload),
+        })
+        request = Request(video["upload_url"], data=payload, headers=video["required_headers"], method="PUT")
+        with urlopen(request, timeout=15):
+            pass
+        _, movie = self.call_api("/movies/create.php", {
+            "title": f"VJ historical credit test {run_id}",
+            "description": "",
+            "tier": "free",
+            "release_year": 2026,
+            "duration_minutes": 1,
+            "vj_id": vj_id,
+            "file_size_bytes": len(payload),
+            "r2_key": video["r2_key"],
+        })
+
+        self.assert_api_error("/vjs.php", {"name": f" {original_name.lower()} "}, 409)
+        status, renamed = self.call_method_api("/vjs.php", "PUT", {
+            "id": vj_id, "name": renamed_name,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(renamed["vj"]["name"], renamed_name)
+
+        status, deactivated = self.call_method_api("/vjs.php", "DELETE", {"id": vj_id})
+        self.assertEqual(status, 200)
+        self.assertFalse(deactivated["vj"]["is_active"])
+        _, active_list = self.get_api("/vjs.php", token=self.token)
+        self.assertNotIn(vj_id, [vj["id"] for vj in active_list["vjs"]])
+        _, full_list = self.get_api("/vjs.php?include_inactive=true", token=self.token)
+        self.assertIn(vj_id, [vj["id"] for vj in full_list["vjs"]])
+        _, catalog = self.get_api("/movies.php", token=self.token)
+        historical_movie = next(item for item in catalog["movies"] if item["id"] == movie["movie"]["id"])
+        self.assertEqual(historical_movie["vj_name"], renamed_name)
+
+    def upload_artwork(self, kind, payload, content_type="image/png"):
+        _, upload = self.call_api("/upload/artwork-presign.php", {
+            "kind": kind,
+            "content_type": content_type,
+            "file_size_bytes": len(payload),
+        })
+        request = Request(
+            upload["upload_url"], data=payload,
+            headers=upload["required_headers"], method="PUT",
+        )
+        with urlopen(request, timeout=15):
+            pass
+        return upload["artwork_key"]
+
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
+    def test_movie_registration_verifies_private_artwork_and_catalog_signs_it(self):
+        payload = b"private-test-movie"
+        _, video = self.call_api("/upload/presign.php", {
+            "content_type": "video/mp4", "file_size_bytes": len(payload),
+        })
+        request = Request(
+            video["upload_url"], data=payload,
+            headers=video["required_headers"], method="PUT",
+        )
+        with urlopen(request, timeout=15):
+            pass
+
+        image_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+        )
+        poster_key = self.upload_artwork("poster", image_bytes)
+        backdrop_key = self.upload_artwork("backdrop", image_bytes)
+        status, created = self.call_api("/movies/create.php", {
+            "title": "Artwork and VJ integration test",
+            "description": "Disposable test record.",
+            "tier": "free",
+            "release_year": 2026,
+            "duration_minutes": 1,
+            "vj_id": self.test_vj_id,
+            "poster_key": poster_key,
+            "backdrop_key": backdrop_key,
+            "file_size_bytes": len(payload),
+            "r2_key": video["r2_key"],
+        })
+        self.assertEqual(status, 201)
+        self.assertEqual(created["movie"]["vj_name"], "Rayn Test VJ")
+        self.assertTrue(created["movie"]["poster_signed"])
+        self.assertTrue(created["movie"]["backdrop_signed"])
+        self.assertTrue(created["movie"]["poster_url"].startswith("http://127.0.0.1:"))
+        self.assertNotIn("poster_key", created["movie"])
+        self.assertNotIn("backdrop_key", created["movie"])
+
+        _, catalog = self.get_api("/movies.php", token=self.token)
+        registered = next(movie for movie in catalog["movies"] if movie["id"] == created["movie"]["id"])
+        self.assertEqual(registered["vj_name"], "Rayn Test VJ")
+        self.assertTrue(registered["poster_signed"])
+        self.assertTrue(registered["backdrop_signed"])
+        self.assertNotIn("poster_key", registered)
+        self.assertNotIn("backdrop_key", registered)
+
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
+    def test_movie_registration_rejects_invalid_image_bytes_and_cleans_object(self):
+        video_payload = b"private-test-movie"
+        _, video = self.call_api("/upload/presign.php", {
+            "content_type": "video/mp4", "file_size_bytes": len(video_payload),
+        })
+        video_request = Request(
+            video["upload_url"], data=video_payload,
+            headers=video["required_headers"], method="PUT",
+        )
+        with urlopen(video_request, timeout=15):
+            pass
+        invalid_key = self.upload_artwork("poster", b"not an image")
+
+        self.assert_api_error("/movies/create.php", {
+            "title": "Invalid artwork test",
+            "description": "",
+            "tier": "free",
+            "release_year": 2026,
+            "duration_minutes": 1,
+            "vj_id": self.test_vj_id,
+            "poster_key": invalid_key,
+            "file_size_bytes": len(video_payload),
+            "r2_key": video["r2_key"],
+        }, 400)
+        self.assertNotIn(("rayn-test", invalid_key), FakeR2Handler.objects)
+
+        valid_png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+        )
+        oversized_key = self.upload_artwork("poster", valid_png)
+        oversized_object = ("rayn-test", oversized_key)
+        FakeR2Handler.head_size_overrides[oversized_object] = 5_000_001
+        self.assert_api_error("/movies/create.php", {
+            "title": "Oversized artwork test",
+            "description": "",
+            "tier": "free",
+            "release_year": 2026,
+            "duration_minutes": 1,
+            "vj_id": self.test_vj_id,
+            "poster_key": oversized_key,
+            "file_size_bytes": len(video_payload),
+            "r2_key": video["r2_key"],
+        }, 413)
+        self.assertNotIn(oversized_object, FakeR2Handler.objects)
+        self.assertNotIn(oversized_object, FakeR2Handler.head_size_overrides)
+
+        missing_key = f"posters/{uuid.uuid4().hex}.png"
+        self.assert_api_error("/movies/create.php", {
+            "title": "Missing artwork object test",
+            "description": "",
+            "tier": "free",
+            "release_year": 2026,
+            "duration_minutes": 1,
+            "vj_id": self.test_vj_id,
+            "poster_key": missing_key,
+            "file_size_bytes": len(video_payload),
+            "r2_key": video["r2_key"],
+        }, 400)
+
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
+    def test_movie_registration_rejects_invalid_vj_and_preserves_legacy_artwork_urls(self):
+        payload = b"legacy-url-test-movie"
+        _, video = self.call_api("/upload/presign.php", {
+            "content_type": "video/mp4", "file_size_bytes": len(payload),
+        })
+        request = Request(video["upload_url"], data=payload, headers=video["required_headers"], method="PUT")
+        with urlopen(request, timeout=15):
+            pass
+
+        base_payload = {
+            "title": "Legacy artwork URL test",
+            "description": "",
+            "tier": "free",
+            "release_year": 2026,
+            "duration_minutes": 1,
+            "file_size_bytes": len(payload),
+            "r2_key": video["r2_key"],
+        }
+        self.assert_api_error("/movies/create.php", {
+            **base_payload, "vj_id": 999_999,
+        }, 422)
+
+        status, created = self.call_api("/movies/create.php", {
+            **base_payload,
+            "vj_id": self.test_vj_id,
+            "poster_url": "https://images.example.invalid/legacy-poster.jpg",
+            "backdrop_url": "https://images.example.invalid/legacy-backdrop.jpg",
+        })
+        self.assertEqual(status, 201)
+        _, catalog = self.get_api("/movies.php", token=self.token)
+        movie = next(item for item in catalog["movies"] if item["id"] == created["movie"]["id"])
+        self.assertEqual(movie["poster_url"], "https://images.example.invalid/legacy-poster.jpg")
+        self.assertEqual(movie["backdrop_url"], "https://images.example.invalid/legacy-backdrop.jpg")
+        self.assertEqual(movie["vj_name"], "Rayn Test VJ")
+
     def test_create_rejects_missing_r2_object_before_database_registration(self):
         self.assert_api_error("/movies/create.php", {
             "title": "Missing object test",
@@ -521,6 +790,7 @@ class MultipartApiTests(unittest.TestCase):
             "tier": "free",
             "release_year": 2026,
             "duration_minutes": 1,
+            "vj_id": 1,
             "file_size_bytes": 1,
             "r2_key": "uploads/" + "a" * 32 + ".mp4",
         }, 400)
@@ -544,6 +814,7 @@ class MultipartApiTests(unittest.TestCase):
             "tier": "free",
             "release_year": 2026,
             "duration_minutes": 1,
+            "vj_id": self.test_vj_id,
             "file_size_bytes": len(payload),
             "r2_key": upload["r2_key"],
         })
@@ -574,6 +845,7 @@ class MultipartApiTests(unittest.TestCase):
             "tier": "vip",
             "release_year": 2026,
             "duration_minutes": 1,
+            "vj_id": self.test_vj_id,
             "file_size_bytes": len(payload),
             "r2_key": upload["r2_key"],
         })
@@ -688,6 +960,7 @@ class MultipartApiTests(unittest.TestCase):
             "tier": "free",
             "release_year": 2026,
             "duration_minutes": 1,
+            "vj_id": 1,
             "file_size_bytes": len(payload),
             "r2_key": upload["r2_key"],
         }, 413)

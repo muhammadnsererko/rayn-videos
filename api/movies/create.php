@@ -15,6 +15,11 @@ $releaseYear = filter_var($input['release_year'] ?? null, FILTER_VALIDATE_INT);
 $durationMinutes = filter_var($input['duration_minutes'] ?? null, FILTER_VALIDATE_INT);
 $posterUrl = trim((string) ($input['poster_url'] ?? ''));
 $backdropUrl = trim((string) ($input['backdrop_url'] ?? ''));
+$posterKey = validated_artwork_key($input['poster_key'] ?? null, 'poster');
+$backdropKey = validated_artwork_key($input['backdrop_key'] ?? null, 'backdrop');
+$vjId = filter_var($input['vj_id'] ?? null, FILTER_VALIDATE_INT, [
+    'options' => ['min_range' => 1],
+]);
 $r2Key = (string) ($input['r2_key'] ?? '');
 
 if ($declaredSize === false || $declaredSize < 1) {
@@ -37,6 +42,9 @@ if ($releaseYear === false || $releaseYear < 1888 || $releaseYear > (int) date('
 }
 if ($durationMinutes === false || $durationMinutes < 1 || $durationMinutes > 1000) {
     json_response(['error' => 'duration_minutes must be between 1 and 1000.'], 422);
+}
+if ($vjId === false) {
+    json_response(['error' => 'A valid vj_id is required.'], 422);
 }
 if ($posterUrl !== '' && (!filter_var($posterUrl, FILTER_VALIDATE_URL) || parse_url($posterUrl, PHP_URL_SCHEME) !== 'https')) {
     json_response(['error' => 'poster_url must be a valid HTTPS URL.'], 422);
@@ -77,11 +85,93 @@ if ($objectSize !== $declaredSize) {
     json_response(['error' => 'Uploaded video size does not match file_size_bytes.'], 400);
 }
 
+$vjStatement = database()->prepare('SELECT id, name FROM vjs WHERE id = :id AND is_active = TRUE');
+$vjStatement->execute(['id' => $vjId]);
+$vj = $vjStatement->fetch();
+if (!$vj) {
+    json_response(['error' => 'vj_id must reference an active VJ.'], 422);
+}
+
+$posterSignedUrl = null;
+$backdropSignedUrl = null;
+$artworkKeys = array_filter([
+    'poster' => $posterKey,
+    'backdrop' => $backdropKey,
+], static fn (?string $key): bool => $key !== null);
+if ($artworkKeys !== []) {
+    $maximumImageBytes = image_max_upload_bytes();
+    $deleteInvalidArtwork = static function (string $key) use ($client): void {
+        try {
+            $client->deleteObject(['Bucket' => r2_bucket(), 'Key' => $key]);
+        } catch (Throwable $deleteException) {
+            error_log('Could not remove invalid uploaded artwork: ' . $deleteException->getMessage());
+        }
+    };
+
+    foreach ($artworkKeys as $kind => $key) {
+        try {
+            $artworkObject = $client->headObject(['Bucket' => r2_bucket(), 'Key' => $key]);
+        } catch (Throwable $exception) {
+            error_log('R2 artwork verification failed: ' . $exception->getMessage());
+            if ($exception instanceof Aws\Exception\AwsException
+                && in_array($exception->getAwsErrorCode(), ['NoSuchKey', 'NotFound'], true)) {
+                json_response(['error' => 'The uploaded ' . $kind . ' could not be found.'], 400);
+            }
+            json_response(['error' => 'The uploaded ' . $kind . ' could not be verified.'], 502);
+        }
+
+        $artworkSize = filter_var($artworkObject['ContentLength'] ?? null, FILTER_VALIDATE_INT);
+        if ($artworkSize === false || $artworkSize < 1 || $artworkSize > $maximumImageBytes) {
+            $deleteInvalidArtwork($key);
+            if ($artworkSize !== false && $artworkSize > $maximumImageBytes) {
+                json_response(['error' => 'Uploaded ' . $kind . ' exceeds the configured maximum size.'], 413);
+            }
+            json_response(['error' => 'Uploaded ' . $kind . ' must be larger than zero bytes.'], 400);
+        }
+
+        try {
+            $artworkObject = $client->getObject(['Bucket' => r2_bucket(), 'Key' => $key]);
+            $artworkBytes = (string) $artworkObject['Body'];
+        } catch (Throwable $exception) {
+            error_log('Could not inspect uploaded R2 artwork: ' . $exception->getMessage());
+            json_response(['error' => 'The uploaded ' . $kind . ' could not be verified.'], 502);
+        }
+
+        $imageInfo = @getimagesizefromstring($artworkBytes);
+        $expectedMimeTypes = [
+            'jpg' => 'image/jpeg',
+            'png' => 'image/png',
+            'webp' => 'image/webp',
+        ];
+        $extension = strtolower(pathinfo($key, PATHINFO_EXTENSION));
+        if (strlen($artworkBytes) !== $artworkSize
+            || $imageInfo === false
+            || !isset($expectedMimeTypes[$extension])
+            || ($imageInfo['mime'] ?? null) !== $expectedMimeTypes[$extension]) {
+            $deleteInvalidArtwork($key);
+            json_response(['error' => 'Uploaded ' . $kind . ' is not a valid supported image.'], 400);
+        }
+
+        try {
+            if ($kind === 'poster') {
+                $posterSignedUrl = signed_artwork_url($client, $key);
+            } else {
+                $backdropSignedUrl = signed_artwork_url($client, $key);
+            }
+        } catch (Throwable $exception) {
+            error_log('Could not create signed R2 artwork URL: ' . $exception->getMessage());
+            json_response(['error' => 'Could not prepare the uploaded artwork.'], 502);
+        }
+    }
+}
+
 try {
     $statement = database()->prepare(
-        'INSERT INTO movies (title, description, tier, release_year, duration_minutes, poster_url, backdrop_url, r2_key) '
-        . 'VALUES (:title, :description, :tier, :release_year, :duration_minutes, :poster_url, :backdrop_url, :r2_key) '
-        . 'RETURNING id, title, description, tier, release_year, duration_minutes, poster_url, backdrop_url, created_at'
+        'INSERT INTO movies (title, description, tier, release_year, duration_minutes, poster_url, backdrop_url, '
+        . 'poster_key, backdrop_key, vj_id, r2_key) '
+        . 'VALUES (:title, :description, :tier, :release_year, :duration_minutes, :poster_url, :backdrop_url, '
+        . ':poster_key, :backdrop_key, :vj_id, :r2_key) '
+        . 'RETURNING id, title, description, tier, release_year, duration_minutes, poster_url, backdrop_url, vj_id, created_at'
     );
     $statement->execute([
         'title' => $title,
@@ -91,6 +181,9 @@ try {
         'duration_minutes' => $durationMinutes,
         'poster_url' => $posterUrl !== '' ? $posterUrl : null,
         'backdrop_url' => $backdropUrl !== '' ? $backdropUrl : null,
+        'poster_key' => $posterKey,
+        'backdrop_key' => $backdropKey,
+        'vj_id' => $vjId,
         'r2_key' => $r2Key,
     ]);
 } catch (PDOException $exception) {
@@ -101,4 +194,15 @@ try {
     json_response(['error' => 'Could not create movie.'], 500);
 }
 
-json_response(['movie' => $statement->fetch()], 201);
+$movie = $statement->fetch();
+$movie['vj_name'] = $vj['name'];
+if ($posterSignedUrl !== null) {
+    $movie['poster_url'] = $posterSignedUrl;
+    $movie['poster_signed'] = true;
+}
+if ($backdropSignedUrl !== null) {
+    $movie['backdrop_url'] = $backdropSignedUrl;
+    $movie['backdrop_signed'] = true;
+}
+
+json_response(['movie' => $movie], 201);

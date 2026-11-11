@@ -34,14 +34,20 @@ function formatAddedDate(value) {
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(date);
 }
 
-function MovieTile({ movie, onPlay, showAddedDate = false }) {
+function MovieTile({ movie, onPlay, onArtworkError, showAddedDate = false }) {
   const addedDate = showAddedDate ? formatAddedDate(movie.created_at) : '';
 
   return (
     <article className="movie-tile">
       <button className="poster-frame" type="button" aria-label={`Play ${movie.title}`} onClick={() => onPlay(movie)}>
         {movie.poster_url ? (
-          <img className="poster-image" src={movie.poster_url} alt={`${movie.title} poster`} loading="lazy" />
+          <img
+            className="poster-image"
+            src={movie.poster_url}
+            alt={`${movie.title} poster`}
+            loading="lazy"
+            onError={() => onArtworkError(movie)}
+          />
         ) : (
           <span className="poster-placeholder" aria-hidden="true">
             <Clapperboard size={30} strokeWidth={1.4} />
@@ -54,13 +60,14 @@ function MovieTile({ movie, onPlay, showAddedDate = false }) {
       <div className="movie-info">
         <h3 title={movie.title}>{movie.title}</h3>
         <p>{movie.release_year} <span aria-hidden="true">·</span> {movie.duration_minutes} min</p>
+        {movie.vj_name && <p className="movie-vj">VJ · {movie.vj_name}</p>}
         {addedDate && <p className="movie-added-date">Added {addedDate}</p>}
       </div>
     </article>
   );
 }
 
-function MovieRow({ id, title, description, movies, onPlay, showAddedDate = false }) {
+function MovieRow({ id, title, description, movies, onPlay, onArtworkError, showAddedDate = false }) {
   return (
     <section className="content-section movie-row-section" id={id} aria-labelledby={`${id}-title`}>
       <div className="section-heading">
@@ -72,7 +79,7 @@ function MovieRow({ id, title, description, movies, onPlay, showAddedDate = fals
       </div>
       <div className="movie-row">
         {movies.map((movie) => (
-          <MovieTile key={movie.id} movie={movie} onPlay={onPlay} showAddedDate={showAddedDate} />
+          <MovieTile key={movie.id} movie={movie} onPlay={onPlay} onArtworkError={onArtworkError} showAddedDate={showAddedDate} />
         ))}
       </div>
     </section>
@@ -93,6 +100,27 @@ export default function App() {
   const [error, setError] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
   const searchInputRef = useRef(null);
+  const artworkRefreshesRef = useRef(new Set());
+
+  const refreshArtwork = useCallback(async (movie) => {
+    if (!movie.poster_signed && !movie.backdrop_signed) return;
+    const refreshKeyForMovie = String(movie.id);
+    if (artworkRefreshesRef.current.has(refreshKeyForMovie)) return;
+    artworkRefreshesRef.current.add(refreshKeyForMovie);
+    try {
+      const { data } = await api.get('/movies.php', { params: { tier: 'all' } });
+      const refreshedMovie = data.movies.find((item) => String(item.id) === refreshKeyForMovie);
+      if (!refreshedMovie) return;
+      setMovies((current) => current.map((item) => (
+        String(item.id) === refreshKeyForMovie ? { ...item, ...refreshedMovie } : item
+      )));
+      setError('');
+    } catch (requestError) {
+      setError(apiErrorMessage(requestError));
+    } finally {
+      artworkRefreshesRef.current.delete(refreshKeyForMovie);
+    }
+  }, []);
 
   const closePlayer = useCallback(() => setActiveMovie(null), []);
   const signInFromPlayer = useCallback(() => {
@@ -153,8 +181,12 @@ export default function App() {
   const featuredMovie = sortedMovies[0];
   const trendingSelection = sortedMovies.slice(0, 8);
   const recentlyAdded = sortedMovies.slice(0, 8);
-  const heroImage = featuredMovie?.backdrop_url || featuredMovie?.poster_url;
-  const usesPosterBackdrop = !featuredMovie?.backdrop_url && Boolean(featuredMovie?.poster_url);
+  const usesBattleshipBackdrop = featuredMovie?.title.trim().toLowerCase() === 'battleship';
+  const heroImage = featuredMovie?.backdrop_url
+    || (usesBattleshipBackdrop ? '/backdrops/battleship-naval.svg' : featuredMovie?.poster_url);
+  const usesPosterBackdrop = !featuredMovie?.backdrop_url
+    && !usesBattleshipBackdrop
+    && Boolean(featuredMovie?.poster_url);
   const normalizedSearch = search.trim().toLowerCase();
   const visibleMovies = sortedMovies.filter((movie) => (
     (tier === 'all' || movie.tier === tier)
@@ -209,7 +241,11 @@ export default function App() {
               src={heroImage}
               alt=""
               fetchPriority="high"
-              onError={(event) => { event.currentTarget.hidden = true; }}
+              onError={(event) => {
+                event.currentTarget.hidden = true;
+                if (featuredMovie.backdrop_signed || featuredMovie.poster_signed) refreshArtwork(featuredMovie);
+              }}
+              onLoad={(event) => { event.currentTarget.hidden = false; }}
             />
           )}
           <div className="hero-shade" aria-hidden="true" />
@@ -272,6 +308,7 @@ export default function App() {
               description="An editorial selection from the Rayn collection."
               movies={trendingSelection}
               onPlay={setActiveMovie}
+              onArtworkError={refreshArtwork}
             />
             <MovieRow
               id="recently-added"
@@ -279,6 +316,7 @@ export default function App() {
               description="Fresh additions to the collection."
               movies={recentlyAdded}
               onPlay={setActiveMovie}
+              onArtworkError={refreshArtwork}
               showAddedDate
             />
           </>
@@ -342,7 +380,7 @@ export default function App() {
             ) : (
               <div className="movie-grid">
                 {visibleMovies.map((movie) => (
-                  <MovieTile key={movie.id} movie={movie} onPlay={setActiveMovie} />
+                  <MovieTile key={movie.id} movie={movie} onPlay={setActiveMovie} onArtworkError={refreshArtwork} />
                 ))}
               </div>
             )}

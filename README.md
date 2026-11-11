@@ -6,13 +6,23 @@ PHP 8.1+ JSON API for RAYN STREAM. PostgreSQL is hosted by Supabase; video uploa
 
 1. Install PHP 8.1+ with the `pdo_pgsql` extension and Composer.
 2. Install PHP dependencies with `composer install`.
-3. In the Supabase SQL Editor, run [`database/schema.sql`](database/schema.sql).
+3. For a fresh database only, run [`database/schema.sql`](database/schema.sql) in the Supabase SQL Editor.
 4. Copy `.env.example` to `.env` and set your Supabase PostgreSQL connection details and Cloudflare R2 credentials. Use the Supabase direct or session pooler connection details, including its assigned username and port. Keep `.env` private; it is ignored by Git.
 5. Generate a JWT secret with `php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'` and put the result in `JWT_SECRET`.
 6. Create a private R2 bucket and an R2 API token with object read/write access scoped to that bucket.
 7. Promote an account to administrator from the Supabase SQL Editor after signing up: `UPDATE users SET role = 'admin' WHERE email = lower('admin@example.com');`
 8. For password resets, apply [`database/add-password-reset-tokens.sql`](database/add-password-reset-tokens.sql) to an existing database (or use the updated schema for a new database), then configure the Resend variables below. Resend's free transactional tier requires a sending domain that you own and verify.
-9. To enable landscape hero artwork on an existing database, run [`database/add-movie-backdrop-url.sql`](database/add-movie-backdrop-url.sql) in the Supabase SQL Editor. New databases get the column from [`database/schema.sql`](database/schema.sql). Existing movies remain valid with a `NULL` backdrop; the homepage uses their poster as a darkened fallback.
+9. On an existing Supabase database, apply the [artwork and VJ migration](database/add-movie-artwork-and-vjs.sql) by following the ordered steps below before deploying updated application code.
+
+### Existing Supabase Database Migration Order
+
+1. Confirm the existing `users` and `movies` tables are present. Do not run `schema.sql` as a substitute for this migration; `CREATE TABLE IF NOT EXISTS` does not add fields to existing tables.
+2. Run the entire [`database/add-movie-artwork-and-vjs.sql`](database/add-movie-artwork-and-vjs.sql) script in the Supabase SQL Editor. It is idempotent, creates the VJ table, and adds nullable artwork/VJ fields (including `backdrop_url` if absent) while retaining legacy URL columns. If it reports an error, resolve that before continuing.
+3. Set `IMAGE_MAX_UPLOAD_BYTES` if changing its 5,000,000-byte default, and configure private-bucket CORS for the deployed frontend origin with PUT and the required Content-Type header.
+4. Deploy the updated API and frontend only after the migration and storage configuration are ready.
+5. In the admin form, use **Manage VJs** to add the active VJ names before registering new movies. The migration deliberately does not assign VJs to existing movies; their nullable association preserves legacy records.
+
+For a fresh database, run [`database/schema.sql`](database/schema.sql) instead of the existing-database migration. Do not run or assume either migration has been applied by this code change.
 
 For local development, export `.env` values into the PHP server process and serve the workspace root:
 
@@ -34,6 +44,7 @@ Set these variables in the Render service environment:
 - `DB_HOST`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` for Supabase PostgreSQL (`DB_PORT` is optional and defaults to `5432`; `DB_SSLMODE` defaults to `require`).
 - `JWT_SECRET` and, optionally, `JWT_ISSUER`.
 - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET` for the private Cloudflare R2 bucket.
+- `IMAGE_MAX_UPLOAD_BYTES` is optional and defaults to `5000000` bytes for each poster/backdrop.
 - `CORS_ALLOWED_ORIGINS` as a comma-separated list of exact deployed frontend origins.
 - `RESEND_API_KEY`, `MAIL_FROM_EMAIL` (an address at a domain verified with Resend), and `FRONTEND_URL` (the HTTPS frontend origin used in reset links). `MAIL_FROM_NAME` is optional.
 
@@ -49,14 +60,24 @@ All request and response bodies are JSON. Protected endpoints accept `Authorizat
 | POST | `/api/auth/login.php` | Public | Authenticate with `email` and `password`; returns `token` and `user`. |
 | POST | `/api/auth/password-reset-request.php` | Public | Request a one-time password reset link; response does not disclose whether the email is registered. |
 | POST | `/api/auth/password-reset-complete.php` | Public | Set a new password with the reset token and new password. |
-| GET | `/api/movies.php?tier=all\|free\|vip` | Public | List movies with optional `poster_url` (portrait) and `backdrop_url` (landscape) artwork. The `r2_key` is never included in list responses. |
+| GET | `/api/movies.php?tier=all\|free\|vip` | Public | List movies and VJ names. Legacy image URLs remain available; private artwork keys are returned as expiring signed URLs. Storage keys are not included. |
 | POST | `/api/upload/presign.php` | Admin | Without `file_size_bytes`, preserves the existing single-PUT response. With a size, selects single PUT or multipart and returns its mode and upload details. |
+| POST | `/api/upload/artwork-presign.php` | Admin | Presign a private poster or backdrop PUT from `kind`, supported `content_type`, and `file_size_bytes`; object keys are generated by the API. |
 | POST | `/api/upload/multipart/part.php` | Admin | Presign one `UploadPart` request using `r2_key`, `upload_id`, and `part_number`. |
 | POST | `/api/upload/multipart/complete.php` | Admin | Complete multipart upload from ordered `{part_number, etag}` entries; verifies nonzero object size and configured maximum. |
 | POST | `/api/upload/multipart/abort.php` | Admin | Abort an incomplete multipart upload using `r2_key` and `upload_id`. |
-| POST | `/api/movies/create.php` | Admin | Save metadata after the upload, with `title`, `description`, `tier`, `release_year`, `duration_minutes`, `poster_url` and `backdrop_url` (both optional), and the returned `r2_key`. |
+| POST | `/api/movies/create.php` | Admin | Register a movie after video upload with metadata, required active `vj_id`, the returned video `r2_key`, and optional validated `poster_key` / `backdrop_key`. Legacy `poster_url` / `backdrop_url` inputs remain supported. |
+| GET/POST/PUT/DELETE | `/api/vjs.php` | Admin | List active VJs (or include inactive with `include_inactive=true`), add, rename, and deactivate VJs. Deactivation preserves movie credits. |
 
 Single-PUT URLs expire after 15 minutes and retain the existing `Content-Type` header contract. Multipart part URLs also expire after 15 minutes. The browser uploads bytes directly to R2; movie bytes never pass through PHP. Both multipart completion and movie creation verify the R2 object. The bucket remains private.
+
+### Poster, Backdrop, And VJ Management
+
+Poster and landscape backdrop images are optional. The admin form uploads JPG, PNG, or WebP files (up to 5 MB by default) directly to the existing private R2 bucket using short-lived, admin-authorized presigned PUT URLs. The API generates separate `posters/` and `backdrops/` keys, verifies stored size and image content before movie registration, and the public catalog returns short-lived signed GET URLs. When an artwork URL expires, the frontend refreshes catalog data; it does not repeat the movie or image upload. Existing `poster_url` and `backdrop_url` values remain supported.
+
+Set `IMAGE_MAX_UPLOAD_BYTES` on the API to change the artwork byte limit. Keep all R2 credentials backend-only. Configure the private bucket's CORS policy for the exact frontend origins with `AllowedMethods: ["PUT"]` and an allowed `Content-Type` header (or `["*"]`). Continue exposing `ETag` for the existing multipart video flow. Do not make the bucket public. An R2 lifecycle rule for old unregistered artwork objects is recommended because an administrator can abandon a form after uploading an image.
+
+VJs are stored in PostgreSQL rather than a frontend list. Admins can add, rename, and deactivate names from the movie form. Movie records keep the VJ foreign key; deactivation hides a VJ from new uploads but does not erase historical credits. Existing movies keep a null VJ until an administrator explicitly assigns one.
 
 ## Notes
 
@@ -99,6 +120,7 @@ Set these Render environment variables (safe defaults are also in `.env.example`
 | Variable | Default | Meaning |
 | --- | ---: | --- |
 | `VIDEO_MAX_UPLOAD_BYTES` | `1000000000` | Maximum declared and completed movie object size (1,000,000,000 bytes). |
+| `IMAGE_MAX_UPLOAD_BYTES` | `5000000` | Maximum size in bytes for each poster or backdrop image. |
 | `R2_MULTIPART_THRESHOLD_BYTES` | `67108864` | At or above this size, an MP4 uses multipart upload. |
 | `R2_MULTIPART_PART_SIZE_BYTES` | `16777216` | Part size; minimum is 5 MiB, and the final part may be smaller. |
 

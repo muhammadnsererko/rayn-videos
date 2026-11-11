@@ -21,6 +21,7 @@ export default function MovieDetailsDialog({ movie, onClose, onPlay }) {
         <div className="hero-meta">
           {movie.release_year && <span>{movie.release_year}</span>}
           {movie.duration_minutes && <span>{movie.duration_minutes} min</span>}
+          {movie.vj_name && <span>VJ · {movie.vj_name}</span>}
           <span className={`tier-tag tier-${movie.tier}`}>{movie.tier}</span>
         </div>
         <p className="dialog-copy movie-details-description">

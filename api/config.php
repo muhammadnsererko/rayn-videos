@@ -116,6 +116,11 @@ function video_max_upload_bytes(): int
     return positive_env_int('VIDEO_MAX_UPLOAD_BYTES', 1000000000);
 }
 
+function image_max_upload_bytes(): int
+{
+    return positive_env_int('IMAGE_MAX_UPLOAD_BYTES', 5000000);
+}
+
 function r2_multipart_threshold_bytes(): int
 {
     return positive_env_int('R2_MULTIPART_THRESHOLD_BYTES', 67108864);
@@ -133,6 +138,36 @@ function validated_upload_key(mixed $value): string
     }
 
     return $value;
+}
+
+function validated_artwork_key(mixed $value, string $kind): ?string
+{
+    if ($value === null || $value === '') {
+        return null;
+    }
+
+    $prefix = match ($kind) {
+        'poster' => 'posters',
+        'backdrop' => 'backdrops',
+        default => null,
+    };
+    if ($prefix === null || !is_string($value) || !preg_match(
+        '#\A' . $prefix . '/[a-f0-9]{32}\.(?:jpg|png|webp)\z#',
+        $value
+    )) {
+        json_response(['error' => 'Invalid ' . $kind . ' artwork reference.'], 422);
+    }
+
+    return $value;
+}
+
+function signed_artwork_url(S3Client $client, string $key): string
+{
+    $command = $client->getCommand('GetObject', [
+        'Bucket' => r2_bucket(),
+        'Key' => $key,
+    ]);
+    return (string) $client->createPresignedRequest($command, '+15 minutes')->getUri();
 }
 
 function validated_multipart_upload_id(mixed $value): string
@@ -193,7 +228,8 @@ function database(): PDO
     $host = required_env('DB_HOST');
     $port = env_value('DB_PORT') ?: '5432';
     $name = required_env('DB_NAME');
-    $dsn = sprintf('pgsql:host=%s;port=%s;dbname=%s;sslmode=require', $host, $port, $name);
+    $sslMode = env_value('DB_SSLMODE') ?: 'require';
+$dsn = sprintf('pgsql:host=%s;port=%s;dbname=%s;sslmode=%s', $host, $port, $name, $sslMode);
 
     try {
         $password = env_value('DB_PASSWORD') ?? env_value('DB_PASS');
