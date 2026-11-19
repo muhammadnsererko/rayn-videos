@@ -13,6 +13,7 @@ PHP 8.1+ JSON API for RAYN STREAM. PostgreSQL is hosted by Supabase; video uploa
 7. Promote an account to administrator from the Supabase SQL Editor after signing up: `UPDATE users SET role = 'admin' WHERE email = lower('admin@example.com');`
 8. For password resets, apply [`database/add-password-reset-tokens.sql`](database/add-password-reset-tokens.sql) to an existing database (or use the updated schema for a new database), then configure the Resend variables below. Resend's free transactional tier requires a sending domain that you own and verify.
 9. On an existing Supabase database, apply the [artwork and VJ migration](database/add-movie-artwork-and-vjs.sql) by following the ordered steps below before deploying updated application code.
+10. For an existing database with the VJ table installed, apply the [TV series schema migration](database/add-tv-series.sql) manually as described below. Fresh databases receive these tables from `schema.sql`.
 
 ### Existing Supabase Database Migration Order
 
@@ -23,6 +24,12 @@ PHP 8.1+ JSON API for RAYN STREAM. PostgreSQL is hosted by Supabase; video uploa
 5. In the admin form, use **Manage VJs** to add the active VJ names before registering new movies. The migration deliberately does not assign VJs to existing movies; their nullable association preserves legacy records.
 
 For a fresh database, run [`database/schema.sql`](database/schema.sql) instead of the existing-database migration. Do not run or assume either migration has been applied by this code change.
+
+### TV Series Schema Migration
+
+1. Confirm the existing `vjs` table is present. If not, first apply [`database/add-movie-artwork-and-vjs.sql`](database/add-movie-artwork-and-vjs.sql) using the instructions above.
+2. In the Supabase SQL Editor, run the entire [`database/add-tv-series.sql`](database/add-tv-series.sql) script. It creates the series, seasons, episodes, and VJ-specific episode video version tables and indexes in a transaction. The script is additive and idempotent; it does not alter or backfill existing movies, users, or VJs.
+3. Confirm the transaction completed successfully before deploying any future application code that depends on the new tables. Do not run `schema.sql` on an existing database as a substitute.
 
 For local development, export `.env` values into the PHP server process and serve the workspace root:
 
@@ -106,6 +113,18 @@ python3 tools/video_pipeline/encode.py \
 	--output processed/movie.mp4 \
 	--config tools/video_pipeline/profile.example.json
 ```
+
+On Windows with an AMD GPU and an FFmpeg build that includes `h264_amf`, select AMF explicitly. Use an output path that does not already exist:
+
+```powershell
+py -3 tools\video_pipeline\encode.py `
+	--input "D:\Videos\movie.mp4" `
+	--output "D:\Videos\processed\movie_AMF.mp4" `
+	--config tools\video_pipeline\profile.example.json `
+	--encoder h264_amf
+```
+
+AMF uses transcoding usage, balanced quality, NV12 input, and the configured video bitrate, maximum rate, and buffer size. If AMF initialization, encoding, or output validation fails, the utility retries with two-pass `libx264`; the CPU result must pass the same validation before publication. The original source is never overwritten, and an existing output is preserved unless `--overwrite` is explicitly supplied.
 
 The initial profile caps dimensions at 1280x720 without upscaling, preserves aspect ratio, caps frame rate at 30 fps, and uses two-pass `libx264`, `yuv420p`, AAC at 96 kbps when audio exists, and `+faststart`. Video bitrate defaults to 610 kbps (the minimum profile is 600 kbps); edit the JSON profile or use CLI overrides to tune it. Pass logs and partial output are temporary and removed on success, failure, or interruption. Encoded files belong in ignored `processed/`, not Git.
 

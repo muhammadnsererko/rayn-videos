@@ -234,6 +234,7 @@ class MultipartApiTests(unittest.TestCase):
                 PHP, "-r",
                 'require "api/config.php"; $db = database(); $db->exec(file_get_contents("database/schema.sql")); '
                 '$db->exec(file_get_contents("database/add-movie-artwork-and-vjs.sql")); '
+                '$db->exec(file_get_contents("database/add-tv-series.sql")); '
                 '$db->exec("INSERT INTO users (display_name, email, password_hash, role) VALUES '
                 '(\'Rayn Test User\', \'rayn-user@example.invalid\', \'test-only\', \'user\'), '
                 '(\'Rayn Test VIP\', \'rayn-vip@example.invalid\', \'test-only\', \'vip\') '
@@ -248,19 +249,25 @@ class MultipartApiTests(unittest.TestCase):
             database_ids = json.loads(database_setup.stdout)
             cls.test_user_ids = database_ids["users"]
             cls.test_vj_id = database_ids["vj"]
+            cls.token = admin_token("admin", cls.test_user_ids[2])
+        else:
+            cls.token = admin_token()
         cls.php_server = subprocess.Popen(
             [PHP, "-S", f"127.0.0.1:{cls.api_port}", "-t", str(ROOT)],
             cwd=ROOT, env=environment, stdout=subprocess.DEVNULL,
         )
         cls.api_url = f"http://127.0.0.1:{cls.api_port}/api"
-        cls.token = admin_token()
         for _ in range(100):
             if cls.php_server.poll() is not None:
                 raise RuntimeError("PHP integration server exited before tests started.")
             try:
-                cls.call_api("/upload/multipart/abort.php", {"r2_key": "invalid", "upload_id": "invalid"})
+                cls.call_api(
+                    "/upload/multipart/abort.php",
+                    {"r2_key": "invalid", "upload_id": "invalid"},
+                    token=admin_token("user"),
+                )
             except HTTPError as error:
-                if error.code == 422:
+                if error.code == 403:
                     error.close()
                     break
                 error.close()
@@ -328,6 +335,7 @@ class MultipartApiTests(unittest.TestCase):
         raised.exception.close()
         return raised.exception
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_multipart_upload_complete_and_object_head_verification(self):
         file_size = PART_SIZE + 17
         status, upload = self.call_api("/upload/presign.php", {
@@ -362,6 +370,7 @@ class MultipartApiTests(unittest.TestCase):
         self.assertEqual(completed["size_bytes"], file_size)
         self.assertTrue(completed["completed"])
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_completion_retry_succeeds_when_r2_lost_the_completed_response(self):
         body = b"c" * (PART_SIZE + 17)
         file_size = len(body)
@@ -398,6 +407,7 @@ class MultipartApiTests(unittest.TestCase):
         self.assertEqual(completed["size_bytes"], len(body))
         self.assertTrue(completed["completed"])
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_head_failure_after_completion_does_not_delete_object(self):
         body = b"h" * (PART_SIZE + 17)
         _, upload = self.call_api("/upload/presign.php", {
@@ -431,6 +441,7 @@ class MultipartApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(completed["size_bytes"], len(body))
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_completion_deletes_object_with_mismatched_actual_size(self):
         body = b"actual size differs"
         expected_size = PART_SIZE + 1
@@ -458,6 +469,7 @@ class MultipartApiTests(unittest.TestCase):
         }, 400)
         self.assertNotIn(object_id, FakeR2Handler.objects)
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_completion_rejects_missing_or_invalid_expected_size_before_r2(self):
         payload = {
             "r2_key": "uploads/" + "a" * 32 + ".mp4",
@@ -474,6 +486,7 @@ class MultipartApiTests(unittest.TestCase):
             **payload, "expected_size_bytes": MAX_UPLOAD_BYTES + 1,
         }, 413)
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_unrelated_completion_error_is_not_treated_as_success(self):
         _, upload = self.call_api("/upload/presign.php", {
             "content_type": "video/mp4", "file_size_bytes": PART_SIZE + 1,
@@ -500,6 +513,7 @@ class MultipartApiTests(unittest.TestCase):
         }, 502)
         self.assertEqual(FakeR2Handler.objects[upload_object], b"already-present")
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_declared_small_single_put_presign_path_remains_usable(self):
         payload = b"small-mp4-test"
         _, upload = self.call_api("/upload/presign.php", {
@@ -517,6 +531,7 @@ class MultipartApiTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
         self.assertIn(("rayn-test", upload["r2_key"]), FakeR2Handler.objects)
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_abort_removes_incomplete_multipart_session(self):
         _, upload = self.call_api("/upload/presign.php", {
             "content_type": "video/mp4", "file_size_bytes": PART_SIZE + 1,
@@ -543,6 +558,7 @@ class MultipartApiTests(unittest.TestCase):
             "content_type": "video/mp4", "file_size_bytes": PART_SIZE + 1,
         }, 403, token=admin_token("user"))
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_artwork_presign_validates_admin_kind_type_and_size(self):
         self.assert_api_error("/upload/artwork-presign.php", {
             "kind": "poster", "content_type": "image/png", "file_size_bytes": 1,
@@ -626,6 +642,8 @@ class MultipartApiTests(unittest.TestCase):
         _, catalog = self.get_api("/movies.php", token=self.token)
         historical_movie = next(item for item in catalog["movies"] if item["id"] == movie["movie"]["id"])
         self.assertEqual(historical_movie["vj_name"], renamed_name)
+        self.assertEqual(str(historical_movie["vj_id"]), str(vj_id))
+        self.assertFalse(historical_movie["vj_is_active"])
 
     def upload_artwork(self, kind, payload, content_type="image/png"):
         _, upload = self.call_api("/upload/artwork-presign.php", {
@@ -640,6 +658,218 @@ class MultipartApiTests(unittest.TestCase):
         with urlopen(request, timeout=15):
             pass
         return upload["artwork_key"]
+
+    def upload_series_version(self, episode_id, vj_id, payload):
+        _, upload = self.call_api("/upload/presign.php", {
+            "content_type": "video/mp4",
+            "file_size_bytes": len(payload),
+        })
+        request = Request(
+            upload["upload_url"], data=payload,
+            headers=upload["required_headers"], method="PUT",
+        )
+        with urlopen(request, timeout=15):
+            pass
+        self._last_series_upload_key = upload["r2_key"]
+        return self.call_api("/series/versions/create.php", {
+            "episode_id": episode_id,
+            "vj_id": vj_id,
+            "file_size_bytes": len(payload),
+            "r2_key": upload["r2_key"],
+        })
+
+    def test_series_endpoints_validate_ids_and_require_admin_for_writes(self):
+        self.assert_get_api_error("/series/detail.php?id=0", 422)
+        self.assert_api_error("/series/create.php", {
+            "title": "Unauthorized series",
+        }, 403, token=admin_token("user"))
+        self.assert_api_error("/series/seasons/create.php", {
+            "series_id": 1,
+            "season_number": 1,
+        }, 403, token=admin_token("user"))
+        self.assert_api_error("/series/episodes/create.php", {
+            "season_id": 1,
+            "episode_number": 1,
+            "title": "Unauthorized episode",
+            "duration_minutes": 1,
+            "tier": "free",
+        }, 403, token=admin_token("user"))
+        self.assert_api_error("/series/versions/create.php", {
+            "episode_id": 1,
+            "vj_id": 1,
+            "file_size_bytes": 1,
+            "r2_key": "uploads/" + "a" * 32 + ".mp4",
+        }, 403, token=admin_token("user"))
+        self.assert_get_api_error("/episodes/play.php?id=0", 422)
+
+    @unittest.skipUnless(
+        all(os.environ.get(f"RAYN_TEST_DB_{key}") for key in ("HOST", "NAME", "USER", "PASSWORD")),
+        "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database",
+    )
+    def test_admin_authorization_uses_current_database_role(self):
+        valid_token = admin_token("admin", self.test_user_ids[2])
+        status, created = self.call_method_api(
+            "/vjs.php", "POST", {"name": f"Live Admin Check {uuid.uuid4().hex[:8]}"},
+            token=valid_token,
+        )
+        self.assertEqual(status, 201)
+        self.assertTrue(created["vj"]["is_active"])
+
+        self.assert_api_error(
+            "/vjs.php", {"name": "Demoted admin token"}, 403,
+            token=admin_token("admin", self.test_user_ids[0]),
+        )
+        self.assert_api_error(
+            "/vjs.php", {"name": "Deleted admin token"}, 403,
+            token=admin_token("admin", 9_223_372_036_854_775_807),
+        )
+        self.assert_api_error(
+            "/vjs.php", {"name": "Invalid admin subject"}, 403,
+            token=admin_token("admin", "not-a-user-id"),
+        )
+
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
+    def test_series_catalogue_version_replacement_and_vip_playback(self):
+        run_id = uuid.uuid4().hex[:8]
+        _, first_vj_response = self.call_method_api("/vjs.php", "POST", {
+            "name": f"Series VJ One {run_id}",
+        })
+        first_vj_id = first_vj_response["vj"]["id"]
+        _, second_vj_response = self.call_method_api("/vjs.php", "POST", {
+            "name": f"Series VJ Two {run_id}",
+        })
+        second_vj_id = second_vj_response["vj"]["id"]
+
+        _, created_series = self.call_api("/series/create.php", {
+            "title": f"Series API Integration {run_id}",
+            "description": "Disposable series API integration test.",
+        })
+        series_id = created_series["series"]["id"]
+        _, created_season = self.call_api("/series/seasons/create.php", {
+            "series_id": series_id,
+            "season_number": 1,
+            "release_year": 2026,
+        })
+        season_id = created_season["season"]["id"]
+        self.assert_api_error("/series/seasons/create.php", {
+            "series_id": series_id,
+            "season_number": 1,
+        }, 409)
+
+        _, free_episode = self.call_api("/series/episodes/create.php", {
+            "season_id": season_id,
+            "episode_number": 1,
+            "title": "The First Signal",
+            "description": "",
+            "duration_minutes": 42,
+            "tier": "free",
+        })
+        free_episode_id = free_episode["episode"]["id"]
+        _, vip_episode = self.call_api("/series/episodes/create.php", {
+            "season_id": season_id,
+            "episode_number": 2,
+            "title": "The Second Signal",
+            "description": "",
+            "duration_minutes": 45,
+            "tier": "vip",
+        })
+        vip_episode_id = vip_episode["episode"]["id"]
+        self.assert_api_error("/series/episodes/create.php", {
+            "season_id": season_id,
+            "episode_number": 3,
+            "title": "Invalid duration",
+            "duration_minutes": 1001,
+            "tier": "free",
+        }, 422)
+
+        _, empty_detail = self.get_api(f"/series/detail.php?id={series_id}")
+        empty_episode = empty_detail["series"]["seasons"][0]["episodes"][0]
+        self.assertFalse(empty_episode["available"])
+        self.assertEqual(empty_episode["versions"], [])
+
+        _, first_version = self.upload_series_version(
+            free_episode_id, first_vj_id, b"series-free-version-one",
+        )
+        first_version_id = first_version["version"]["id"]
+        self.assertEqual(str(first_version["version"]["vj_id"]), str(first_vj_id))
+        self.assertEqual(first_version["version"]["vj_name"], first_vj_response["vj"]["name"])
+
+        # A duplicate-key insert fails after retirement; rollback keeps the prior
+        # version current and preserves its history.
+        self.assert_api_error("/series/versions/create.php", {
+            "episode_id": free_episode_id,
+            "vj_id": first_vj_id,
+            "file_size_bytes": len(b"series-free-version-one"),
+            "r2_key": self._last_series_upload_key,
+        }, 409)
+        self.assertIn(("rayn-test", self._last_series_upload_key), FakeR2Handler.objects)
+        _, detail_before_replacement = self.get_api(f"/series/detail.php?id={series_id}")
+        still_current = detail_before_replacement["series"]["seasons"][0]["episodes"][0]["versions"]
+        self.assertEqual([str(version["id"]) for version in still_current], [str(first_version_id)])
+
+        _, replacement_version = self.upload_series_version(
+            free_episode_id, first_vj_id, b"series-free-version-two",
+        )
+        replacement_version_id = replacement_version["version"]["id"]
+        self.assertNotEqual(first_version_id, replacement_version_id)
+        _, second_vj_version = self.upload_series_version(
+            free_episode_id, second_vj_id, b"series-free-version-vj-two",
+        )
+        _, vip_version = self.upload_series_version(
+            vip_episode_id, second_vj_id, b"series-vip-version",
+        )
+
+        _, detail = self.get_api(f"/series/detail.php?id={series_id}")
+        self.assertEqual(detail["series"]["id"], series_id)
+        self.assertNotIn("poster_key", detail["series"])
+        self.assertNotIn("backdrop_key", detail["series"])
+        season = detail["series"]["seasons"][0]
+        self.assertEqual(season["season_number"], 1)
+        episode = season["episodes"][0]
+        self.assertEqual(episode["episode_number"], 1)
+        self.assertTrue(episode["available"])
+        self.assertEqual(
+            {str(version["id"]) for version in episode["versions"]},
+            {str(replacement_version_id), str(second_vj_version["version"]["id"])},
+        )
+        self.assertNotIn(str(first_version_id), {str(version["id"]) for version in episode["versions"]})
+        self.assertNotIn("r2_key", json.dumps(detail))
+
+        _, catalogue = self.get_api("/series.php")
+        self.assertIn(series_id, [item["id"] for item in catalogue["series"]])
+        self.assertNotIn("r2_key", json.dumps(catalogue))
+        self.assert_api_error("/series/seasons/create.php", {
+            "series_id": 999_999_999,
+            "season_number": 1,
+        }, 404)
+
+        free_path = f"/episodes/play.php?id={replacement_version_id}"
+        free_status, free_playback = self.get_api(free_path)
+        self.assertEqual(free_status, 200)
+        self.assertTrue(free_playback["url"].startswith("http://127.0.0.1:"))
+        self.assertNotIn("r2_key", free_playback)
+
+        vip_path = f"/episodes/play.php?id={vip_version['version']['id']}"
+        self.assert_get_api_error(vip_path, 401)
+        self.assert_get_api_error(vip_path, 403, admin_token("user", self.test_user_ids[0]))
+        vip_status, vip_playback = self.get_api(vip_path, admin_token("vip", self.test_user_ids[1]))
+        self.assertEqual(vip_status, 200)
+        self.assertTrue(vip_playback["url"].startswith("http://127.0.0.1:"))
+
+        self.call_method_api("/vjs.php", "DELETE", {"id": first_vj_id})
+        _, detail_after_deactivation = self.get_api(f"/series/detail.php?id={series_id}")
+        free_episode_after_deactivation = detail_after_deactivation["series"]["seasons"][0]["episodes"][0]
+        self.assertEqual(
+            {str(version["vj_id"]) for version in free_episode_after_deactivation["versions"]},
+            {str(second_vj_id)},
+        )
+        self.assert_get_api_error(f"/episodes/play.php?id={replacement_version_id}", 404)
+        self.call_method_api("/vjs.php", "DELETE", {"id": second_vj_id})
+        _, detail_without_active_versions = self.get_api(f"/series/detail.php?id={series_id}")
+        unavailable_episode = detail_without_active_versions["series"]["seasons"][0]["episodes"][0]
+        self.assertFalse(unavailable_episode["available"])
+        self.assertEqual(unavailable_episode["versions"], [])
+        self.assert_get_api_error(f"/episodes/play.php?id={second_vj_version['version']['id']}", 404)
 
     @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_movie_registration_verifies_private_artwork_and_catalog_signs_it(self):
@@ -673,6 +903,8 @@ class MultipartApiTests(unittest.TestCase):
         })
         self.assertEqual(status, 201)
         self.assertEqual(created["movie"]["vj_name"], "Rayn Test VJ")
+        self.assertEqual(str(created["movie"]["vj_id"]), str(self.test_vj_id))
+        self.assertTrue(created["movie"]["vj_is_active"])
         self.assertTrue(created["movie"]["poster_signed"])
         self.assertTrue(created["movie"]["backdrop_signed"])
         self.assertTrue(created["movie"]["poster_url"].startswith("http://127.0.0.1:"))
@@ -682,6 +914,8 @@ class MultipartApiTests(unittest.TestCase):
         _, catalog = self.get_api("/movies.php", token=self.token)
         registered = next(movie for movie in catalog["movies"] if movie["id"] == created["movie"]["id"])
         self.assertEqual(registered["vj_name"], "Rayn Test VJ")
+        self.assertEqual(str(registered["vj_id"]), str(self.test_vj_id))
+        self.assertTrue(registered["vj_is_active"])
         self.assertTrue(registered["poster_signed"])
         self.assertTrue(registered["backdrop_signed"])
         self.assertNotIn("poster_key", registered)
@@ -783,6 +1017,7 @@ class MultipartApiTests(unittest.TestCase):
         self.assertEqual(movie["backdrop_url"], "https://images.example.invalid/legacy-backdrop.jpg")
         self.assertEqual(movie["vj_name"], "Rayn Test VJ")
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_create_rejects_missing_r2_object_before_database_registration(self):
         self.assert_api_error("/movies/create.php", {
             "title": "Missing object test",
@@ -865,6 +1100,7 @@ class MultipartApiTests(unittest.TestCase):
             else:
                 self.assert_get_api_error(path, expected_status, token)
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_presign_accepts_889mb_and_950mb_and_rejects_over_1gb(self):
         for file_size in (889_000_000, 950_000_000):
             with self.subTest(file_size=file_size):
@@ -906,6 +1142,7 @@ class MultipartApiTests(unittest.TestCase):
             "content_type": "video/mp4", "file_size_bytes": MAX_UPLOAD_BYTES + 1,
         }, 413)
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_presign_rejects_missing_or_invalid_declared_file_size(self):
         self.assert_api_error("/upload/presign.php", {"content_type": "video/mp4"}, 422)
         for file_size in (None, "", "not-a-size", "12", True, 1.5, 0, -1):
@@ -914,6 +1151,7 @@ class MultipartApiTests(unittest.TestCase):
                     "content_type": "video/mp4", "file_size_bytes": file_size,
                 }, 422)
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_completed_object_over_maximum_is_deleted(self):
         _, upload = self.call_api("/upload/presign.php", {
             "content_type": "video/mp4", "file_size_bytes": PART_SIZE + 17,
@@ -940,6 +1178,7 @@ class MultipartApiTests(unittest.TestCase):
         }, 413)
         self.assertNotIn(("rayn-test", upload["r2_key"]), FakeR2Handler.objects)
 
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
     def test_registration_rejects_and_deletes_actual_object_over_maximum(self):
         payload = b"small payload despite oversized actual object metadata"
         _, upload = self.call_api("/upload/presign.php", {

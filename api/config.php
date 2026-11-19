@@ -298,6 +298,20 @@ function require_admin(): object
         json_response(['error' => 'Administrator access required.'], 403);
     }
 
+    $subject = filter_var($user->sub ?? null, FILTER_VALIDATE_INT, [
+        'options' => ['min_range' => 1],
+    ]);
+    if ($subject === false) {
+        json_response(['error' => 'Administrator access required.'], 403);
+    }
+
+    $statement = database()->prepare('SELECT role FROM users WHERE id = :id');
+    $statement->bindValue('id', $subject, PDO::PARAM_INT);
+    $statement->execute();
+    if ($statement->fetchColumn() !== 'admin') {
+        json_response(['error' => 'Administrator access required.'], 403);
+    }
+
     return $user;
 }
 

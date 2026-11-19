@@ -196,6 +196,7 @@ try {
 
 $movie = $statement->fetch();
 $movie['vj_name'] = $vj['name'];
+$movie['vj_is_active'] = true;
 if ($posterSignedUrl !== null) {
     $movie['poster_url'] = $posterSignedUrl;
     $movie['poster_signed'] = true;

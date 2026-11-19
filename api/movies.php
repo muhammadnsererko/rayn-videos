@@ -12,7 +12,8 @@ if (!in_array($tier, ['all', 'free', 'vip'], true)) {
 
 $sql = 'SELECT movies.id, movies.title, movies.description, movies.tier, movies.release_year, '
     . 'movies.duration_minutes, movies.poster_url, movies.backdrop_url, movies.poster_key, '
-    . 'movies.backdrop_key, vjs.name AS vj_name, movies.created_at '
+    . 'movies.backdrop_key, movies.vj_id, vjs.name AS vj_name, '
+    . 'vjs.is_active AS vj_is_active, movies.created_at '
     . 'FROM movies LEFT JOIN vjs ON vjs.id = movies.vj_id';
 if ($tier !== 'all') {
     $sql .= ' WHERE movies.tier = :tier';
@@ -26,6 +27,11 @@ if ($tier !== 'all') {
 $statement->execute();
 
 $movies = $statement->fetchAll();
+foreach ($movies as &$movie) {
+    $movie['vj_is_active'] = in_array($movie['vj_is_active'], [true, 1, '1', 't', 'true'], true);
+}
+unset($movie);
+
 $hasPrivateArtwork = false;
 foreach ($movies as $movie) {
     if ($movie['poster_key'] !== null || $movie['backdrop_key'] !== null) {

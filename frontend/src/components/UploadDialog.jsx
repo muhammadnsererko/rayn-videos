@@ -12,7 +12,7 @@ function formatBytes(bytes) {
   return `${(bytes / 1_000_000).toFixed(1)} MB`;
 }
 
-export default function UploadDialog({ onClose, onCreated }) {
+export default function UploadDialog({ onClose, onCreated, onVjsChanged }) {
   const [file, setFile] = useState(null);
   const [posterFile, setPosterFile] = useState(null);
   const [backdropFile, setBackdropFile] = useState(null);
@@ -383,7 +383,10 @@ export default function UploadDialog({ onClose, onCreated }) {
         {vjManagementOpen && (
           <VjManagementDialog
             onClose={() => setVjManagementOpen(false)}
-            onChanged={loadVjs}
+            onChanged={() => {
+              loadVjs();
+              onVjsChanged?.();
+            }}
           />
         )}
       </section>

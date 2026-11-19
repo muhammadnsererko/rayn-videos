@@ -6,11 +6,21 @@ import PlayerDialog from './components/PlayerDialog';
 import UploadDialog from './components/UploadDialog';
 import api, { apiErrorMessage } from './services/api';
 
+const SELECTED_VJ_STORAGE_KEY = 'rayn_selected_vj';
+
 function readStoredUser() {
   try {
     return JSON.parse(localStorage.getItem('rayn_user') || 'null');
   } catch {
     return null;
+  }
+}
+
+function readStoredVj() {
+  try {
+    return localStorage.getItem(SELECTED_VJ_STORAGE_KEY) || 'all';
+  } catch {
+    return 'all';
   }
 }
 
@@ -94,6 +104,7 @@ export default function App() {
   const [infoMovie, setInfoMovie] = useState(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [tier, setTier] = useState('all');
+  const [selectedVj, setSelectedVj] = useState(readStoredVj);
   const [search, setSearch] = useState('');
   const [movies, setMovies] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -178,9 +189,12 @@ export default function App() {
   }
 
   const sortedMovies = sortByCreatedAt(movies);
-  const featuredMovie = sortedMovies[0];
-  const trendingSelection = sortedMovies.slice(0, 8);
-  const recentlyAdded = sortedMovies.slice(0, 8);
+  const filteredMovies = selectedVj === 'all'
+    ? sortedMovies
+    : sortedMovies.filter((movie) => String(movie.vj_id) === selectedVj);
+  const featuredMovie = filteredMovies[0];
+  const trendingSelection = filteredMovies.slice(0, 8);
+  const recentlyAdded = filteredMovies.slice(0, 8);
   const usesBattleshipBackdrop = featuredMovie?.title.trim().toLowerCase() === 'battleship';
   const heroImage = featuredMovie?.backdrop_url
     || (usesBattleshipBackdrop ? '/backdrops/battleship-naval.svg' : featuredMovie?.poster_url);
@@ -188,10 +202,34 @@ export default function App() {
     && !usesBattleshipBackdrop
     && Boolean(featuredMovie?.poster_url);
   const normalizedSearch = search.trim().toLowerCase();
-  const visibleMovies = sortedMovies.filter((movie) => (
+  const availableVjs = [...new Map(
+    sortedMovies
+      .filter((movie) => movie.vj_id != null && movie.vj_is_active)
+      .map((movie) => [String(movie.vj_id), { id: String(movie.vj_id), name: movie.vj_name }]),
+  ).values()].sort((first, second) => first.name.localeCompare(second.name));
+  const visibleMovies = filteredMovies.filter((movie) => (
     (tier === 'all' || movie.tier === tier)
     && movie.title.toLowerCase().includes(normalizedSearch)
   ));
+
+  useEffect(() => {
+    if (loading || error) return;
+
+    const hasSelectedVj = movies.some((movie) => (
+      movie.vj_is_active && String(movie.vj_id) === selectedVj
+    ));
+    const nextVj = selectedVj !== 'all' && !hasSelectedVj ? 'all' : selectedVj;
+    if (nextVj !== selectedVj) setSelectedVj(nextVj);
+    try {
+      localStorage.setItem(SELECTED_VJ_STORAGE_KEY, nextVj);
+    } catch {
+      // The selector remains usable when browser storage is unavailable.
+    }
+  }, [selectedVj, loading, error, movies]);
+
+  function chooseVj(vjId) {
+    setSelectedVj(vjId);
+  }
 
   return (
     <div className="app-shell">
@@ -300,7 +338,7 @@ export default function App() {
           <span className="hero-index" aria-hidden="true">RAYN / 01</span>
         </section>
 
-        {sortedMovies.length > 0 && (
+        {filteredMovies.length > 0 && (
           <>
             <MovieRow
               id="popular-picks"
@@ -334,6 +372,37 @@ export default function App() {
               </span>
             </div>
             <div className="catalog-controls" aria-label="Filter movies">
+              <div className="vj-selector" role="group" aria-label="Choose your VJ">
+                <span className="vj-selector-label">Choose your VJ</span>
+                <div className="vj-selector-options">
+                  <button
+                    className={`filter-tab ${selectedVj === 'all' ? 'filter-active' : ''}`}
+                    type="button"
+                    aria-pressed={selectedVj === 'all'}
+                    onClick={() => chooseVj('all')}
+                  >
+                    All VJs
+                  </button>
+                  {availableVjs.map((vj) => (
+                    <button
+                      className={`filter-tab ${selectedVj === vj.id ? 'filter-active' : ''}`}
+                      key={vj.id}
+                      type="button"
+                      aria-pressed={selectedVj === vj.id}
+                      onClick={() => chooseVj(vj.id)}
+                    >
+                      {vj.name}
+                    </button>
+                  ))}
+                </div>
+                {loading ? (
+                  <span className="vj-selector-status" role="status">Loading VJs…</span>
+                ) : error ? (
+                  <span className="vj-selector-status" role="status">VJ filters are unavailable.</span>
+                ) : availableVjs.length === 0 ? (
+                  <span className="vj-selector-status">No VJs have available films.</span>
+                ) : null}
+              </div>
               <div className="filter-tabs" role="group" aria-label="Access tier">
                 {['all', 'free', 'vip'].map((option) => (
                   <button
@@ -374,8 +443,16 @@ export default function App() {
             ) : visibleMovies.length === 0 ? (
               <div className="state-panel empty-state">
                 <Clapperboard size={27} strokeWidth={1.3} />
-                <h2>{search ? 'No matching films.' : 'The collection is waiting.'}</h2>
-                <p>{search ? 'Try another title or clear your search.' : 'New additions will appear here.'}</p>
+                <h2>
+                  {search || tier !== 'all' || selectedVj !== 'all'
+                    ? 'No films match these filters.'
+                    : 'The collection is waiting.'}
+                </h2>
+                <p>
+                  {search || tier !== 'all' || selectedVj !== 'all'
+                    ? 'Try another title or choose different filters.'
+                    : 'New additions will appear here.'}
+                </p>
               </div>
             ) : (
               <div className="movie-grid">
@@ -420,7 +497,13 @@ export default function App() {
           }}
         />
       )}
-      {uploadOpen && <UploadDialog onClose={() => setUploadOpen(false)} onCreated={addMovie} />}
+      {uploadOpen && (
+        <UploadDialog
+          onClose={() => setUploadOpen(false)}
+          onCreated={addMovie}
+          onVjsChanged={() => setRefreshKey((key) => key + 1)}
+        />
+      )}
     </div>
   );
 }
