@@ -1,0 +1,54 @@
+name: Backend integration tests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: rayn_test
+          POSTGRES_USER: rayn_test
+          POSTGRES_PASSWORD: rayn_test_only_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rayn_test -d rayn_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      RAYN_TEST_DB_HOST: 127.0.0.1
+      RAYN_TEST_DB_PORT: 5432
+      RAYN_TEST_DB_NAME: rayn_test
+      RAYN_TEST_DB_USER: rayn_test
+      RAYN_TEST_DB_PASSWORD: rayn_test_only_password
+      RAYN_TEST_DB_SSLMODE: disable
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: curl, fileinfo, iconv, mbstring, openssl, pdo_pgsql, simplexml
+          tools: composer:v2
+
+      - name: Install locked Composer dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Run backend integration tests
+        run: python tests/test_multipart_api.py
