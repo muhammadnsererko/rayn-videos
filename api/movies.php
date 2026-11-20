@@ -14,9 +14,9 @@ $sql = 'SELECT movies.id, movies.title, movies.description, movies.tier, movies.
     . 'movies.duration_minutes, movies.poster_url, movies.backdrop_url, movies.poster_key, '
     . 'movies.backdrop_key, movies.vj_id, vjs.name AS vj_name, '
     . 'vjs.is_active AS vj_is_active, movies.created_at '
-    . 'FROM movies LEFT JOIN vjs ON vjs.id = movies.vj_id';
+    . 'FROM movies LEFT JOIN vjs ON vjs.id = movies.vj_id WHERE movies.deletion_pending = FALSE';
 if ($tier !== 'all') {
-    $sql .= ' WHERE movies.tier = :tier';
+    $sql .= ' AND movies.tier = :tier';
 }
 $sql .= ' ORDER BY movies.created_at DESC, movies.id DESC';
 

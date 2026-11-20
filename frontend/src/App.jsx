@@ -4,6 +4,7 @@ import AuthDialog from './components/AuthDialog';
 import MovieDetailsDialog from './components/MovieDetailsDialog';
 import PlayerDialog from './components/PlayerDialog';
 import UploadDialog from './components/UploadDialog';
+import AdminPortal from './components/AdminPortal';
 import api, { apiErrorMessage } from './services/api';
 
 const SELECTED_VJ_STORAGE_KEY = 'rayn_selected_vj';
@@ -103,6 +104,8 @@ export default function App() {
   const [activeMovie, setActiveMovie] = useState(null);
   const [infoMovie, setInfoMovie] = useState(null);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminRefreshKey, setAdminRefreshKey] = useState(0);
   const [tier, setTier] = useState('all');
   const [selectedVj, setSelectedVj] = useState(readStoredVj);
   const [search, setSearch] = useState('');
@@ -181,11 +184,13 @@ export default function App() {
     localStorage.removeItem('rayn_token');
     localStorage.removeItem('rayn_user');
     setUser(null);
+    setAdminOpen(false);
   }
 
   function addMovie(movie) {
     setMovies((current) => [movie, ...current.filter((item) => item.id !== movie.id)]);
     setUploadOpen(false);
+    setAdminRefreshKey((key) => key + 1);
   }
 
   const sortedMovies = sortByCreatedAt(movies);
@@ -231,6 +236,33 @@ export default function App() {
     setSelectedVj(vjId);
   }
 
+  if (adminOpen && user?.role === 'admin') {
+    return (
+      <>
+        <AdminPortal
+          user={user}
+          onExit={() => setAdminOpen(false)}
+          onAddMovie={() => setUploadOpen(true)}
+          onContentChanged={() => {
+            setAdminRefreshKey((key) => key + 1);
+            setRefreshKey((key) => key + 1);
+          }}
+          refreshKey={adminRefreshKey}
+        />
+        {uploadOpen && (
+          <UploadDialog
+            onClose={() => setUploadOpen(false)}
+            onCreated={addMovie}
+            onVjsChanged={() => {
+              setRefreshKey((key) => key + 1);
+              setAdminRefreshKey((key) => key + 1);
+            }}
+          />
+        )}
+      </>
+    );
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -249,6 +281,11 @@ export default function App() {
           {user?.role === 'admin' && (
             <button className="button button-admin" type="button" aria-label="Add film" onClick={() => setUploadOpen(true)}>
               <Plus size={16} /> <span>Add film</span>
+            </button>
+          )}
+          {user?.role === 'admin' && (
+            <button className="button button-quiet" type="button" onClick={() => setAdminOpen(true)}>
+              <ShieldCheck size={16} /> <span>Admin</span>
             </button>
           )}
           {user ? (

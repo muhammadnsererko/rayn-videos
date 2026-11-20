@@ -2,9 +2,10 @@
 declare(strict_types=1);
 
 require_once dirname(__DIR__, 2) . '/config.php';
+require_once dirname(__DIR__, 2) . '/admin/common.php';
 
 require_method('POST');
-require_admin();
+$adminUser = require_admin();
 $input = request_json();
 $episodeId = filter_var($input['episode_id'] ?? null, FILTER_VALIDATE_INT, [
     'options' => ['min_range' => 1],
@@ -80,11 +81,28 @@ $db = database();
 try {
     $db->beginTransaction();
 
-    $episodeLock = $db->prepare('SELECT id FROM episodes WHERE id = :id FOR UPDATE');
+    $episodeLock = $db->prepare(
+        'SELECT episodes.id FROM episodes JOIN seasons ON seasons.id = episodes.season_id '
+        . 'JOIN series ON series.id = seasons.series_id '
+        . 'WHERE episodes.id = :id AND episodes.deletion_pending = FALSE '
+        . 'AND seasons.deletion_pending = FALSE AND series.deletion_pending = FALSE '
+        . 'FOR UPDATE OF episodes, seasons, series'
+    );
     $episodeLock->execute(['id' => $episodeId]);
     if (!$episodeLock->fetchColumn()) {
         $db->rollBack();
         json_response(['error' => 'Episode not found.'], 404);
+    }
+
+    admin_assert_storage_keys_available($db, [$key]);
+    $registeredKey = $db->prepare(
+        'SELECT 1 FROM movies WHERE r2_key = :movie_key '
+        . 'UNION ALL SELECT 1 FROM episode_video_versions WHERE r2_key = :episode_key LIMIT 1'
+    );
+    $registeredKey->execute(['movie_key' => $key, 'episode_key' => $key]);
+    if ($registeredKey->fetchColumn()) {
+        $db->rollBack();
+        json_response(['error' => 'This video is already registered.'], 409);
     }
 
     $vjLock = $db->prepare('SELECT id, name FROM vjs WHERE id = :id AND is_active = TRUE FOR SHARE');
@@ -109,7 +127,21 @@ try {
     $insert->execute(['episode_id' => $episodeId, 'vj_id' => $vjId, 'r2_key' => $key]);
     $version = $insert->fetch();
     $version['vj_name'] = $lockedVj['name'];
+    admin_log_activity(
+        $db,
+        admin_actor_id($adminUser),
+        'episode.version_created',
+        'episode',
+        (string) $episodeId,
+        'Added video version for episode ' . $episodeId . ' by ' . $lockedVj['name'],
+        ['version_id' => $version['id']],
+    );
     $db->commit();
+} catch (AdminDeletionException $exception) {
+    if ($db->inTransaction()) {
+        $db->rollBack();
+    }
+    json_response(['error' => $exception->getMessage()], $exception->httpStatus);
 } catch (PDOException $exception) {
     if ($db->inTransaction()) {
         $db->rollBack();

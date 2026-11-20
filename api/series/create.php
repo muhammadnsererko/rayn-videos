@@ -2,9 +2,10 @@
 declare(strict_types=1);
 
 require_once dirname(__DIR__) . '/config.php';
+require_once dirname(__DIR__) . '/admin/common.php';
 
 require_method('POST');
-require_admin();
+$adminUser = require_admin();
 $input = request_json();
 
 $title = trim(is_string($input['title'] ?? null) ? $input['title'] : '');
@@ -86,7 +87,10 @@ if ($artworkKeys !== []) {
 }
 
 try {
-    $statement = database()->prepare(
+    $db = database();
+    $db->beginTransaction();
+    admin_assert_storage_keys_available($db, array_filter([$posterKey, $backdropKey]));
+    $statement = $db->prepare(
         'INSERT INTO series (title, description, poster_url, backdrop_url, poster_key, backdrop_key) '
         . 'VALUES (:title, :description, :poster_url, :backdrop_url, :poster_key, :backdrop_key) '
         . 'RETURNING id, title, description, poster_url, backdrop_url, created_at, updated_at'
@@ -99,9 +103,33 @@ try {
         'poster_key' => $posterKey,
         'backdrop_key' => $backdropKey,
     ]);
+    $series = $statement->fetch();
+    admin_log_activity(
+        $db,
+        admin_actor_id($adminUser),
+        'series.created',
+        'series',
+        (string) $series['id'],
+        'Added series: ' . $series['title'],
+    );
+    $db->commit();
+} catch (AdminDeletionException $exception) {
+    if (isset($db) && $db->inTransaction()) {
+        $db->rollBack();
+    }
+    json_response(['error' => $exception->getMessage()], $exception->httpStatus);
 } catch (PDOException $exception) {
+    if (isset($db) && $db->inTransaction()) {
+        $db->rollBack();
+    }
+    error_log('Series creation failed: ' . $exception->getMessage());
+    json_response(['error' => 'Could not create series.'], 500);
+} catch (Throwable $exception) {
+    if (isset($db) && $db->inTransaction()) {
+        $db->rollBack();
+    }
     error_log('Series creation failed: ' . $exception->getMessage());
     json_response(['error' => 'Could not create series.'], 500);
 }
 
-json_response(['series' => $statement->fetch()], 201);
+json_response(['series' => $series], 201);

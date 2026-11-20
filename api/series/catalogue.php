@@ -10,13 +10,14 @@ function series_catalogue(?int $seriesId = null): array
         . 'episodes.description AS episode_description, episodes.duration_minutes, episodes.tier, '
         . 'episode_video_versions.id AS version_id, episode_video_versions.vj_id, vjs.name AS vj_name '
         . 'FROM series '
-        . 'LEFT JOIN seasons ON seasons.series_id = series.id '
-        . 'LEFT JOIN episodes ON episodes.season_id = seasons.id '
+        . 'LEFT JOIN seasons ON seasons.series_id = series.id AND seasons.deletion_pending = FALSE '
+        . 'LEFT JOIN episodes ON episodes.season_id = seasons.id AND episodes.deletion_pending = FALSE '
         . 'LEFT JOIN episode_video_versions ON episode_video_versions.episode_id = episodes.id '
-        . 'AND episode_video_versions.is_current = TRUE '
+        . 'AND episode_video_versions.is_current = TRUE AND episode_video_versions.deletion_pending = FALSE '
         . 'LEFT JOIN vjs ON vjs.id = episode_video_versions.vj_id AND vjs.is_active = TRUE';
+    $sql .= ' WHERE series.deletion_pending = FALSE';
     if ($seriesId !== null) {
-        $sql .= ' WHERE series.id = :series_id';
+        $sql .= ' AND series.id = :series_id';
     }
     $sql .= ' ORDER BY LOWER(series.title), series.id, seasons.season_number, seasons.id, '
         . 'episodes.episode_number, episodes.id, LOWER(vjs.name), vjs.id';

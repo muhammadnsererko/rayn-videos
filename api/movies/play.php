@@ -16,7 +16,7 @@ if ($id === false) {
     json_response(['error' => 'Movie id must be a positive integer.'], 422);
 }
 
-$statement = database()->prepare('SELECT id, title, tier, r2_key FROM movies WHERE id = :id');
+$statement = database()->prepare('SELECT id, title, tier, r2_key FROM movies WHERE id = :id AND deletion_pending = FALSE');
 $statement->bindValue('id', $id, PDO::PARAM_INT);
 $statement->execute();
 $movie = $statement->fetch();

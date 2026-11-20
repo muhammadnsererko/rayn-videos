@@ -20,9 +20,13 @@ $statement = database()->prepare(
     'SELECT episode_video_versions.id, episodes.tier, episode_video_versions.r2_key '
     . 'FROM episode_video_versions '
     . 'JOIN episodes ON episodes.id = episode_video_versions.episode_id '
+    . 'JOIN seasons ON seasons.id = episodes.season_id '
+    . 'JOIN series ON series.id = seasons.series_id '
     . 'JOIN vjs ON vjs.id = episode_video_versions.vj_id '
     . 'WHERE episode_video_versions.id = :id '
-    . 'AND episode_video_versions.is_current = TRUE AND vjs.is_active = TRUE'
+    . 'AND episode_video_versions.is_current = TRUE AND vjs.is_active = TRUE '
+    . 'AND episode_video_versions.deletion_pending = FALSE AND episodes.deletion_pending = FALSE '
+    . 'AND seasons.deletion_pending = FALSE AND series.deletion_pending = FALSE'
 );
 $statement->bindValue('id', $versionId, PDO::PARAM_INT);
 $statement->execute();

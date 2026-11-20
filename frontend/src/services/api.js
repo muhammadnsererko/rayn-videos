@@ -1,4 +1,7 @@
 import axios from 'axios';
+import { apiErrorMessage } from './errors.js';
+
+export { apiErrorMessage };
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
@@ -10,9 +13,5 @@ api.interceptors.request.use((config) => {
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
-
-export function apiErrorMessage(error) {
-  return error.response?.data?.error || error.message || 'Something went wrong.';
-}
 
 export default api;

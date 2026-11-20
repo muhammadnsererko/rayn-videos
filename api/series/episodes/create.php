@@ -2,9 +2,10 @@
 declare(strict_types=1);
 
 require_once dirname(__DIR__, 2) . '/config.php';
+require_once dirname(__DIR__, 2) . '/admin/common.php';
 
 require_method('POST');
-require_admin();
+$adminUser = require_admin();
 $input = request_json();
 $seasonId = filter_var($input['season_id'] ?? null, FILTER_VALIDATE_INT, [
     'options' => ['min_range' => 1],
@@ -37,14 +38,17 @@ if (!in_array($tier, ['free', 'vip'], true)) {
     json_response(['error' => 'Tier must be free or vip.'], 422);
 }
 
-$parent = database()->prepare('SELECT id FROM seasons WHERE id = :id');
+$db = database();
+$db->beginTransaction();
+$parent = $db->prepare('SELECT id FROM seasons WHERE id = :id AND deletion_pending = FALSE FOR UPDATE');
 $parent->execute(['id' => $seasonId]);
 if (!$parent->fetchColumn()) {
+    $db->rollBack();
     json_response(['error' => 'Season not found.'], 404);
 }
 
 try {
-    $statement = database()->prepare(
+    $statement = $db->prepare(
         'INSERT INTO episodes (season_id, episode_number, title, description, duration_minutes, tier) '
         . 'VALUES (:season_id, :episode_number, :title, :description, :duration_minutes, :tier) '
         . 'RETURNING id, season_id, episode_number, title, description, duration_minutes, tier, created_at'
@@ -57,12 +61,31 @@ try {
         'duration_minutes' => $durationMinutes,
         'tier' => $tier,
     ]);
+    $episode = $statement->fetch();
+    admin_log_activity(
+        $db,
+        admin_actor_id($adminUser),
+        'episode.created',
+        'episode',
+        (string) $episode['id'],
+        'Added episode: ' . $episode['title'],
+    );
+    $db->commit();
 } catch (PDOException $exception) {
+    if ($db->inTransaction()) {
+        $db->rollBack();
+    }
     if ($exception->getCode() === '23505') {
         json_response(['error' => 'That episode number already exists for this season.'], 409);
     }
     error_log('Episode creation failed: ' . $exception->getMessage());
     json_response(['error' => 'Could not create episode.'], 500);
+} catch (Throwable $exception) {
+    if ($db->inTransaction()) {
+        $db->rollBack();
+    }
+    error_log('Episode creation failed: ' . $exception->getMessage());
+    json_response(['error' => 'Could not create episode.'], 500);
 }
 
-json_response(['episode' => $statement->fetch()], 201);
+json_response(['episode' => $episode], 201);

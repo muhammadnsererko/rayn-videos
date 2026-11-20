@@ -2,9 +2,10 @@
 declare(strict_types=1);
 
 require_once dirname(__DIR__) . '/config.php';
+require_once dirname(__DIR__) . '/admin/common.php';
 
 require_method('POST');
-require_admin();
+$adminUser = require_admin();
 $input = request_json();
 $title = trim((string) ($input['title'] ?? ''));
 $description = trim((string) ($input['description'] ?? ''));
@@ -166,7 +167,10 @@ if ($artworkKeys !== []) {
 }
 
 try {
-    $statement = database()->prepare(
+    $db = database();
+    $db->beginTransaction();
+    admin_assert_storage_keys_available($db, array_filter([$r2Key, $posterKey, $backdropKey]));
+    $statement = $db->prepare(
         'INSERT INTO movies (title, description, tier, release_year, duration_minutes, poster_url, backdrop_url, '
         . 'poster_key, backdrop_key, vj_id, r2_key) '
         . 'VALUES (:title, :description, :tier, :release_year, :duration_minutes, :poster_url, :backdrop_url, '
@@ -186,24 +190,45 @@ try {
         'vj_id' => $vjId,
         'r2_key' => $r2Key,
     ]);
+    $movie = $statement->fetch();
+    $movie['vj_name'] = $vj['name'];
+    $movie['vj_is_active'] = true;
+    if ($posterSignedUrl !== null) {
+        $movie['poster_url'] = $posterSignedUrl;
+        $movie['poster_signed'] = true;
+    }
+    if ($backdropSignedUrl !== null) {
+        $movie['backdrop_url'] = $backdropSignedUrl;
+        $movie['backdrop_signed'] = true;
+    }
+    admin_log_activity(
+        $db,
+        admin_actor_id($adminUser),
+        'movie.created',
+        'movie',
+        (string) $movie['id'],
+        'Added movie: ' . $movie['title'],
+    );
+    $db->commit();
+} catch (AdminDeletionException $exception) {
+    if (isset($db) && $db->inTransaction()) {
+        $db->rollBack();
+    }
+    json_response(['error' => $exception->getMessage()], $exception->httpStatus);
 } catch (PDOException $exception) {
+    if (isset($db) && $db->inTransaction()) {
+        $db->rollBack();
+    }
     if ($exception->getCode() === '23505') {
         json_response(['error' => 'This video has already been added.'], 409);
     }
     error_log('Movie creation failed: ' . $exception->getMessage());
     json_response(['error' => 'Could not create movie.'], 500);
+} catch (Throwable $exception) {
+    if (isset($db) && $db->inTransaction()) {
+        $db->rollBack();
+    }
+    error_log('Movie creation failed: ' . $exception->getMessage());
+    json_response(['error' => 'Could not create movie.'], 500);
 }
-
-$movie = $statement->fetch();
-$movie['vj_name'] = $vj['name'];
-$movie['vj_is_active'] = true;
-if ($posterSignedUrl !== null) {
-    $movie['poster_url'] = $posterSignedUrl;
-    $movie['poster_signed'] = true;
-}
-if ($backdropSignedUrl !== null) {
-    $movie['backdrop_url'] = $backdropSignedUrl;
-    $movie['backdrop_signed'] = true;
-}
-
 json_response(['movie' => $movie], 201);

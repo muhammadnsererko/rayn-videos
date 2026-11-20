@@ -14,6 +14,8 @@ PHP 8.1+ JSON API for RAYN STREAM. PostgreSQL is hosted by Supabase; video uploa
 8. For password resets, apply [`database/add-password-reset-tokens.sql`](database/add-password-reset-tokens.sql) to an existing database (or use the updated schema for a new database), then configure the Resend variables below. Resend's free transactional tier requires a sending domain that you own and verify.
 9. On an existing Supabase database, apply the [artwork and VJ migration](database/add-movie-artwork-and-vjs.sql) by following the ordered steps below before deploying updated application code.
 10. For an existing database with the VJ table installed, apply the [TV series schema migration](database/add-tv-series.sql) manually as described below. Fresh databases receive these tables from `schema.sql`.
+11. Apply the [administrator activity migration](database/add-admin-activity.sql) to an existing database before deploying the administrator portal. Fresh databases receive this table from `schema.sql`.
+12. Apply the [recoverable admin-deletions migration](database/add-admin-deletions.sql) to an existing database before deploying the deletion queue. Apply it only after the TV-series and administrator-activity migrations.
 
 ### Existing Supabase Database Migration Order
 
@@ -30,6 +32,14 @@ For a fresh database, run [`database/schema.sql`](database/schema.sql) instead o
 1. Confirm the existing `vjs` table is present. If not, first apply [`database/add-movie-artwork-and-vjs.sql`](database/add-movie-artwork-and-vjs.sql) using the instructions above.
 2. In the Supabase SQL Editor, run the entire [`database/add-tv-series.sql`](database/add-tv-series.sql) script. It creates the series, seasons, episodes, and VJ-specific episode video version tables and indexes in a transaction. The script is additive and idempotent; it does not alter or backfill existing movies, users, or VJs.
 3. Confirm the transaction completed successfully before deploying any future application code that depends on the new tables. Do not run `schema.sql` on an existing database as a substitute.
+
+### Administrator Activity Migration
+
+The admin portal requires the `admin_activity` table for its dashboard activity feed and mutation audit trail. On an existing database, run the complete [`database/add-admin-activity.sql`](database/add-admin-activity.sql) script after confirming the `users` table exists and before deploying the portal. The script is transactional and idempotent. Fresh databases receive the table and index from `schema.sql`.
+
+### Recoverable Admin Deletions Migration
+
+The deletion queue requires the movies, TV-series tables, and `admin_activity`. On an existing database, run [`database/add-admin-deletions.sql`](database/add-admin-deletions.sql) after the TV-series and administrator-activity migrations and before deploying the updated API. It adds `deletion_pending` flags and durable job/object-progress tables. The migration is transactional and idempotent; fresh databases receive these fields and tables from `schema.sql`. Do not run it against production without the usual database backup and approval.
 
 For local development, export `.env` values into the PHP server process and serve the workspace root:
 
@@ -75,6 +85,19 @@ All request and response bodies are JSON. Protected endpoints accept `Authorizat
 | POST | `/api/upload/multipart/abort.php` | Admin | Abort an incomplete multipart upload using `r2_key` and `upload_id`. |
 | POST | `/api/movies/create.php` | Admin | Register a movie after video upload with metadata, required active `vj_id`, the returned video `r2_key`, and optional validated `poster_key` / `backdrop_key`. Legacy `poster_url` / `backdrop_url` inputs remain supported. |
 | GET/POST/PUT/DELETE | `/api/vjs.php` | Admin | List active VJs (or include inactive with `include_inactive=true`), add, rename, and deactivate VJs. Deactivation preserves movie credits. |
+| GET | `/api/admin/dashboard.php` | Admin | Return movie, series, and episode totals with recent administrator activity. |
+| GET | `/api/admin/deletions.php` | Admin | List non-completed deletion and storage-cleanup jobs without exposing R2 keys. |
+| POST | `/api/admin/deletions/retry.php?id=<job_id>` | Admin | Retry durable storage cleanup or database finalization for an existing job. |
+| GET | `/api/admin/movies.php` | Admin | List movies for administration with signed artwork URLs; storage keys are never returned. |
+| GET | `/api/admin/movies.php?id=<id>` | Admin | Return one movie's administrative details. |
+| PUT/DELETE | `/api/admin/movies.php?id=<id>` | Admin | Update movie metadata or queue a recoverable deletion of the movie and its unshared R2 objects. |
+| POST | `/api/admin/movies/replace.php` | Admin | Replace a movie's video after verifying a completed private R2 upload. |
+| GET | `/api/admin/series.php` | Admin | List series with seasons, episodes, and current/historical video versions. |
+| GET | `/api/admin/series.php?id=<id>` | Admin | Return one series and its nested administrative records. |
+| PUT/DELETE | `/api/admin/series.php?id=<id>` | Admin | Update series metadata or queue deletion of an empty series. |
+| PUT/DELETE | `/api/admin/seasons.php?id=<id>` | Admin | Update or queue deletion of an empty season. |
+| PUT/DELETE | `/api/admin/episodes.php?id=<id>` | Admin | Update or queue deletion of an episode after its video versions are removed. |
+| DELETE | `/api/admin/episode-versions.php?id=<id>` | Admin | Queue deletion of an episode video version and its unshared R2 object. |
 
 Single-PUT URLs expire after 15 minutes and retain the existing `Content-Type` header contract. Multipart part URLs also expire after 15 minutes. The browser uploads bytes directly to R2; movie bytes never pass through PHP. Both multipart completion and movie creation verify the R2 object. The bucket remains private.
 
@@ -145,6 +168,13 @@ Set these Render environment variables (safe defaults are also in `.env.example`
 
 For local disposable PostgreSQL tests only, `DB_SSLMODE=disable` may be used if the local server does not offer TLS. Keep `require` for Supabase/production. `R2_ENDPOINT` and `R2_PATH_STYLE_ENDPOINT` are optional local S3-compatible test overrides; leave them unset for Cloudflare R2.
 
+### Administrator portal deployment
+
+1. Apply the TV-series migration if the database predates TV support, then apply `database/add-admin-activity.sql` and `database/add-admin-deletions.sql` on an existing database. Do not run `schema.sql` over an existing production schema.
+2. Deploy the API and frontend together. The portal uses the existing JWT and `require_admin()` database-role check; no new credentials or storage permissions are exposed to the browser.
+3. Sign in with an account whose database role is `admin`, then choose **Admin** in the catalogue header. The existing **Add film** flow remains available and reuses the established presigned and multipart upload implementation.
+4. Deletion is intentionally child-first: remove episode video versions before episodes, episodes before seasons, and seasons before series. This honors the existing `ON DELETE RESTRICT` foreign keys. Each request durably records the target IDs and database-derived R2 keys, marks the target hidden, then cleans storage and finalizes the database record in separate committed phases. Failed or partial cleanup remains retryable from **Deletion recovery**; completed R2 deletions are checkpointed so a retry does not repeat them. Shared objects are preserved and rechecked under per-key database advisory locks. Keep the queue migration applied before deploying this API.
+
 Keep the existing `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET` variables backend-only. The R2 token needs object read/write/delete permissions for the private bucket. The API needs read permission for `HeadObject`, write permission for multipart operations, and delete permission to remove a completed object that fails size verification.
 
 Configure the R2 bucket CORS policy for the exact deployed frontend origins. Browser part PUTs need `AllowedMethods: ["PUT"]`, `AllowedHeaders` including `content-type` (or `*`), and `ExposeHeaders: ["ETag"]`; expose `ETag` so the client can send the part list to the completion API. Set `MaxAgeSeconds` to a reasonable cache duration. Do not make the bucket public. Add an R2 lifecycle rule to abort incomplete multipart uploads after one day so browser closures or lost initiation responses do not retain billable parts indefinitely.
@@ -169,4 +199,4 @@ cd frontend && npm test && npm run build
 cd .. && find api -name '*.php' -print0 | xargs -0 -n1 php -l
 ```
 
-The successful movie-registration API test is opt-in and uses only a disposable PostgreSQL database set through `RAYN_TEST_DB_HOST`, `RAYN_TEST_DB_PORT`, `RAYN_TEST_DB_NAME`, `RAYN_TEST_DB_USER`, and `RAYN_TEST_DB_PASSWORD`; set `RAYN_TEST_DB_SSLMODE=disable` only for a local database without TLS. The test applies the existing schema only to that database. No test points at Supabase automatically.
+The database-backed API tests (including deletion failure/retry, partial-progress, and shared-object cases) are opt-in and use only a disposable PostgreSQL database set through `RAYN_TEST_DB_HOST`, `RAYN_TEST_DB_PORT`, `RAYN_TEST_DB_NAME`, `RAYN_TEST_DB_USER`, and `RAYN_TEST_DB_PASSWORD`; set `RAYN_TEST_DB_SSLMODE=disable` only for a local database without TLS. The tests apply the schema/migrations only to that database. No test points at Supabase automatically.

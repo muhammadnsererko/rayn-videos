@@ -56,6 +56,8 @@ class FakeR2Handler(BaseHTTPRequestHandler):
     head_size_overrides = {}
     complete_response_failures = set()
     head_failures = set()
+    delete_failures = {}
+    delete_attempts = {}
 
     def log_message(self, _format, *_args):
         return
@@ -184,6 +186,13 @@ class FakeR2Handler(BaseHTTPRequestHandler):
         if upload_id:
             self.sessions.pop(upload_id, None)
         else:
+            object_id = (bucket, key)
+            self.delete_attempts[object_id] = self.delete_attempts.get(object_id, 0) + 1
+            remaining_failures = self.delete_failures.get(object_id, 0)
+            if remaining_failures:
+                self.delete_failures[object_id] = remaining_failures - 1
+                self.send_body(503, b"<Error><Code>ServiceUnavailable</Code></Error>")
+                return
             self.objects.pop((bucket, key), None)
             self.content_types.pop((bucket, key), None)
             self.head_size_overrides.pop((bucket, key), None)
@@ -204,6 +213,8 @@ class MultipartApiTests(unittest.TestCase):
         FakeR2Handler.head_size_overrides = {}
         FakeR2Handler.complete_response_failures = set()
         FakeR2Handler.head_failures = set()
+        FakeR2Handler.delete_failures = {}
+        FakeR2Handler.delete_attempts = {}
 
         cls.api_port = unused_port()
         environment = os.environ.copy()
@@ -243,6 +254,8 @@ class MultipartApiTests(unittest.TestCase):
                 '$ids = []; foreach ([\'rayn-user@example.invalid\', \'rayn-vip@example.invalid\', \'rayn-admin@example.invalid\'] as $email) '
                 '{$query = $db->prepare("SELECT id FROM users WHERE email = ?"); $query->execute([$email]); $ids[] = (int) $query->fetchColumn();} '
                 '$db->exec("INSERT INTO vjs (name) VALUES (\'Rayn Test VJ\') ON CONFLICT DO NOTHING"); '
+                '$db->exec(file_get_contents("database/add-admin-activity.sql")); '
+                '$db->exec(file_get_contents("database/add-admin-deletions.sql")); '
                 '$vjId = (int) $db->query("SELECT id FROM vjs WHERE LOWER(name) = LOWER(\'Rayn Test VJ\')")->fetchColumn(); '
                 'echo json_encode([\'users\' => $ids, \'vj\' => $vjId]);',
             ], cwd=ROOT, env=environment, check=True, capture_output=True, text=True, timeout=30)
@@ -252,6 +265,7 @@ class MultipartApiTests(unittest.TestCase):
             cls.token = admin_token("admin", cls.test_user_ids[2])
         else:
             cls.token = admin_token()
+        cls.php_environment = environment
         cls.php_server = subprocess.Popen(
             [PHP, "-S", f"127.0.0.1:{cls.api_port}", "-t", str(ROOT)],
             cwd=ROOT, env=environment, stdout=subprocess.DEVNULL,
@@ -311,6 +325,47 @@ class MultipartApiTests(unittest.TestCase):
             return response.status, json.loads(response.read())
 
     @classmethod
+    def call_method_api_result(cls, path, method, payload=None, token=None):
+        request = Request(
+            cls.api_url + path,
+            data=json.dumps(payload or {}).encode(),
+            headers={"Authorization": f"Bearer {token or cls.token}", "Content-Type": "application/json"},
+            method=method,
+        )
+        try:
+            with urlopen(request, timeout=15) as response:
+                return response.status, json.loads(response.read())
+        except HTTPError as error:
+            try:
+                return error.code, json.loads(error.read())
+            finally:
+                error.close()
+
+    @classmethod
+    def run_test_database(cls, php_code):
+        result = subprocess.run(
+            [PHP, "-r", 'require "api/config.php"; $db = database(); ' + php_code],
+            cwd=ROOT, env=cls.php_environment, check=True, capture_output=True, text=True, timeout=30,
+        )
+        return result.stdout
+
+    @classmethod
+    def insert_test_movie(cls, title, video_key, poster_key=None, backdrop_key=None):
+        php_code = (
+            '$statement = $db->prepare("INSERT INTO movies '
+            '(title, description, tier, release_year, duration_minutes, poster_key, backdrop_key, vj_id, r2_key) '
+            'VALUES (:title, \'\', \'free\', 2025, 1, :poster_key, :backdrop_key, :vj_id, :r2_key) RETURNING id"); '
+            '$statement->execute('
+            '[\'title\' => ' + json.dumps(title) + ', '
+            '\'poster_key\' => ' + ("null" if poster_key is None else json.dumps(poster_key)) + ', '
+            '\'backdrop_key\' => ' + ("null" if backdrop_key is None else json.dumps(backdrop_key)) + ', '
+            '\'vj_id\' => ' + str(cls.test_vj_id) + ', '
+            '\'r2_key\' => ' + json.dumps(video_key) + ']); '
+            'echo (int) $statement->fetchColumn();'
+        )
+        return int(cls.run_test_database(php_code))
+
+    @classmethod
     def get_api(cls, path, token=None):
         headers = {}
         if token:
@@ -330,6 +385,20 @@ class MultipartApiTests(unittest.TestCase):
     def assert_get_api_error(self, path, expected_status, token=None):
         with self.assertRaises(HTTPError) as raised:
             self.get_api(path, token)
+        self.assertEqual(raised.exception.code, expected_status)
+        raised.exception.read()
+        raised.exception.close()
+        return raised.exception
+
+    def assert_method_api_error(self, path, method, expected_status, token=None):
+        request = Request(
+            self.api_url + path,
+            data=b"{}",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method=method,
+        )
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request, timeout=15)
         self.assertEqual(raised.exception.code, expected_status)
         raised.exception.read()
         raised.exception.close()
@@ -701,6 +770,33 @@ class MultipartApiTests(unittest.TestCase):
             "r2_key": "uploads/" + "a" * 32 + ".mp4",
         }, 403, token=admin_token("user"))
         self.assert_get_api_error("/episodes/play.php?id=0", 422)
+
+    def test_admin_portal_routes_reject_non_admin_users(self):
+        user_token = admin_token("user")
+        for path in (
+            "/admin/dashboard.php",
+            "/admin/movies.php",
+            "/admin/series.php",
+            "/admin/deletions.php",
+        ):
+            with self.subTest(path=path):
+                self.assert_get_api_error(path, 403, token=user_token)
+
+        for path, method in (
+            ("/admin/movies.php?id=1", "PUT"),
+            ("/admin/movies.php?id=1", "DELETE"),
+            ("/admin/movies/replace.php", "POST"),
+            ("/admin/series.php?id=1", "PUT"),
+            ("/admin/series.php?id=1", "DELETE"),
+            ("/admin/seasons.php?id=1", "PUT"),
+            ("/admin/seasons.php?id=1", "DELETE"),
+            ("/admin/episodes.php?id=1", "PUT"),
+            ("/admin/episodes.php?id=1", "DELETE"),
+            ("/admin/episode-versions.php?id=1", "DELETE"),
+            ("/admin/deletions/retry.php?id=1", "POST"),
+        ):
+            with self.subTest(path=path, method=method):
+                self.assert_method_api_error(path, method, 403, token=user_token)
 
     @unittest.skipUnless(
         all(os.environ.get(f"RAYN_TEST_DB_{key}") for key in ("HOST", "NAME", "USER", "PASSWORD")),
@@ -1205,6 +1301,235 @@ class MultipartApiTests(unittest.TestCase):
         }, 413)
         self.assertNotIn(object_id, FakeR2Handler.objects)
         self.assertNotIn(object_id, FakeR2Handler.head_size_overrides)
+
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
+    def test_deletion_r2_failure_partial_progress_hides_content_and_retries(self):
+        run_id = uuid.uuid4().hex
+        video_key = f"uploads/{run_id}.mp4"
+        poster_key = f"posters/{run_id}.jpg"
+        backdrop_key = f"backdrops/{run_id}.jpg"
+        object_keys = [video_key, poster_key, backdrop_key]
+        for key in object_keys:
+            FakeR2Handler.objects[("rayn-test", key)] = b"deletion-test-object"
+        movie_id = self.insert_test_movie(
+            f"Deletion retry {run_id}", video_key, poster_key, backdrop_key,
+        )
+        failed_object = ("rayn-test", poster_key)
+        FakeR2Handler.delete_failures[failed_object] = 100
+
+        status, response = self.call_method_api_result(
+            f"/admin/movies.php?id={movie_id}", "DELETE",
+        )
+        self.assertEqual(status, 502)
+        job_id = response["deletion_job_id"]
+        self.assertIsNotNone(job_id)
+        self.assertNotIn(("rayn-test", video_key), FakeR2Handler.objects)
+        self.assertIn(failed_object, FakeR2Handler.objects)
+        self.assertIn(("rayn-test", backdrop_key), FakeR2Handler.objects)
+
+        state = json.loads(self.run_test_database(
+            '$movie = $db->query("SELECT deletion_pending FROM movies WHERE id = ' + str(movie_id) + '")->fetch(PDO::FETCH_ASSOC); '
+            '$job = $db->query("SELECT status FROM admin_deletion_jobs WHERE id = ' + str(job_id) + '")->fetch(PDO::FETCH_ASSOC); '
+            '$objects = $db->query("SELECT object_key, status FROM admin_deletion_objects WHERE job_id = ' + str(job_id) + ' ORDER BY id")->fetchAll(PDO::FETCH_ASSOC); '
+            'echo json_encode(["movie" => $movie, "job" => $job, "objects" => $objects]);'
+        ))
+        self.assertIn(state["movie"]["deletion_pending"], [True, "t", "true", 1, "1"])
+        self.assertEqual(state["job"]["status"], "cleanup_failed")
+        self.assertEqual([item["status"] for item in state["objects"]], ["deleted", "pending", "pending"])
+
+        _, catalogue = self.get_api("/movies.php")
+        self.assertNotIn(str(movie_id), [str(item["id"]) for item in catalogue["movies"]])
+        self.assert_get_api_error(f"/movies/play.php?id={movie_id}", 404)
+        _, pending = self.get_api("/admin/deletions.php", token=self.token)
+        self.assertIn(str(job_id), [str(job["id"]) for job in pending["deletion_jobs"]])
+
+        FakeR2Handler.delete_failures.pop(failed_object, None)
+        status, retried = self.call_method_api_result(
+            f"/admin/deletions/retry.php?id={job_id}", "POST",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(retried["deletion_job_id"], job_id)
+        for key in object_keys:
+            self.assertNotIn(("rayn-test", key), FakeR2Handler.objects)
+        final_state = json.loads(self.run_test_database(
+            '$movieCount = $db->query("SELECT COUNT(*) FROM movies WHERE id = ' + str(movie_id) + '")->fetchColumn(); '
+            '$jobStatus = $db->query("SELECT status FROM admin_deletion_jobs WHERE id = ' + str(job_id) + '")->fetchColumn(); '
+            'echo json_encode(["movie_count" => (int) $movieCount, "job_status" => $jobStatus]);'
+        ))
+        self.assertEqual(final_state, {"movie_count": 0, "job_status": "completed"})
+
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
+    def test_database_finalization_failure_retries_without_redeleting_r2(self):
+        run_id = uuid.uuid4().hex
+        video_key = f"uploads/{run_id}.mp4"
+        FakeR2Handler.objects[("rayn-test", video_key)] = b"db-failure-test-object"
+        movie_id = self.insert_test_movie(f"Database retry {run_id}", video_key)
+        self.run_test_database(
+            '$db->exec("CREATE OR REPLACE FUNCTION rayn_test_block_admin_delete() RETURNS trigger '
+            'LANGUAGE plpgsql AS $$ BEGIN IF OLD.id = ' + str(movie_id) + ' THEN '
+            'RAISE EXCEPTION \'intentional test database failure\'; END IF; RETURN OLD; END; $$"); '
+            '$db->exec("CREATE TRIGGER rayn_test_block_admin_delete BEFORE DELETE ON movies '
+            'FOR EACH ROW EXECUTE FUNCTION rayn_test_block_admin_delete()");'
+        )
+
+        try:
+            status, response = self.call_method_api_result(
+                f"/admin/movies.php?id={movie_id}", "DELETE",
+            )
+            self.assertEqual(status, 503)
+            job_id = response["deletion_job_id"]
+            self.assertNotIn(("rayn-test", video_key), FakeR2Handler.objects)
+            failed_state = json.loads(self.run_test_database(
+                '$movie = $db->query("SELECT deletion_pending FROM movies WHERE id = ' + str(movie_id) + '")->fetchColumn(); '
+                '$job = $db->query("SELECT status FROM admin_deletion_jobs WHERE id = ' + str(job_id) + '")->fetchColumn(); '
+                '$object = $db->query("SELECT status FROM admin_deletion_objects WHERE job_id = ' + str(job_id) + '")->fetchColumn(); '
+                'echo json_encode(["movie_pending" => $movie, "job_status" => $job, "object_status" => $object]);'
+            ))
+            self.assertIn(failed_state["movie_pending"], [True, "t", "true", 1, "1"])
+            self.assertEqual(failed_state["job_status"], "finalization_failed")
+            self.assertEqual(failed_state["object_status"], "deleted")
+
+            self.run_test_database(
+                '$db->exec("DROP TRIGGER rayn_test_block_admin_delete ON movies"); '
+                '$db->exec("DROP FUNCTION rayn_test_block_admin_delete()");'
+            )
+            attempts_before_retry = FakeR2Handler.delete_attempts[("rayn-test", video_key)]
+            status, retried = self.call_method_api_result(
+                f"/admin/deletions/retry.php?id={job_id}", "POST",
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(retried["deletion_job_id"], job_id)
+            self.assertEqual(FakeR2Handler.delete_attempts[("rayn-test", video_key)], attempts_before_retry)
+            self.assertEqual(self.run_test_database(
+                '$count = $db->query("SELECT COUNT(*) FROM movies WHERE id = ' + str(movie_id) + '")->fetchColumn(); '
+                '$status = $db->query("SELECT status FROM admin_deletion_jobs WHERE id = ' + str(job_id) + '")->fetchColumn(); '
+                'echo json_encode([(int) $count, $status]);'
+            ), '[0,"completed"]')
+        finally:
+            self.run_test_database(
+                '$db->exec("DROP TRIGGER IF EXISTS rayn_test_block_admin_delete ON movies"); '
+                '$db->exec("DROP FUNCTION IF EXISTS rayn_test_block_admin_delete()");'
+            )
+
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
+    def test_replacement_old_video_cleanup_failure_is_durable_and_retryable(self):
+        run_id = uuid.uuid4().hex
+        old_key = f"uploads/{run_id}.mp4"
+        FakeR2Handler.objects[("rayn-test", old_key)] = b"old-replacement-video"
+        movie_id = self.insert_test_movie(f"Replacement retry {run_id}", old_key)
+
+        replacement_bytes = b"replacement-video-bytes"
+        _, upload = self.call_api("/upload/presign.php", {
+            "content_type": "video/mp4", "file_size_bytes": len(replacement_bytes),
+        })
+        request = Request(
+            upload["upload_url"], data=replacement_bytes,
+            headers=upload["required_headers"], method="PUT",
+        )
+        with urlopen(request, timeout=15):
+            pass
+
+        old_object = ("rayn-test", old_key)
+        FakeR2Handler.delete_failures[old_object] = 100
+        status, response = self.call_api("/admin/movies/replace.php", {
+            "id": movie_id,
+            "r2_key": upload["r2_key"],
+            "file_size_bytes": len(replacement_bytes),
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(response["cleanup_warning"])
+        job_id = response["cleanup_job_id"]
+        self.assertIsNotNone(job_id)
+        self.assertIn(old_object, FakeR2Handler.objects)
+        self.assertIn(("rayn-test", upload["r2_key"]), FakeR2Handler.objects)
+
+        FakeR2Handler.delete_failures.pop(old_object, None)
+        status, _ = self.call_method_api_result(
+            f"/admin/deletions/retry.php?id={job_id}", "POST",
+        )
+        self.assertEqual(status, 200)
+        self.assertNotIn(old_object, FakeR2Handler.objects)
+        self.assertIn(("rayn-test", upload["r2_key"]), FakeR2Handler.objects)
+        self.assertEqual(self.run_test_database(
+            '$key = $db->query("SELECT r2_key FROM movies WHERE id = ' + str(movie_id) + '")->fetchColumn(); '
+            'echo $key;'
+        ), upload["r2_key"])
+
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
+    def test_shared_storage_reference_is_preserved_until_last_record_deletion(self):
+        run_id = uuid.uuid4().hex
+        shared_poster = f"posters/{run_id}.jpg"
+        first_video = f"uploads/{uuid.uuid4().hex}.mp4"
+        second_video = f"uploads/{uuid.uuid4().hex}.mp4"
+        for key in (shared_poster, first_video, second_video):
+            FakeR2Handler.objects[("rayn-test", key)] = b"shared-reference-test"
+        first_id = self.insert_test_movie(f"Shared first {run_id}", first_video, shared_poster)
+        second_id = self.insert_test_movie(f"Shared second {run_id}", second_video, shared_poster)
+
+        status, _ = self.call_method_api_result(f"/admin/movies.php?id={first_id}", "DELETE")
+        self.assertEqual(status, 200)
+        self.assertIn(("rayn-test", shared_poster), FakeR2Handler.objects)
+        self.assertEqual(FakeR2Handler.delete_attempts.get(("rayn-test", shared_poster), 0), 0)
+
+        status, _ = self.call_method_api_result(f"/admin/movies.php?id={second_id}", "DELETE")
+        self.assertEqual(status, 200)
+        self.assertNotIn(("rayn-test", shared_poster), FakeR2Handler.objects)
+        self.assertEqual(FakeR2Handler.delete_attempts[("rayn-test", shared_poster)], 1)
+
+    @unittest.skipUnless(os.environ.get("RAYN_TEST_DB_HOST"), "Set RAYN_TEST_DB_* to use a disposable PostgreSQL test database")
+    def test_series_season_episode_and_version_deletions_use_the_queue(self):
+        run_id = uuid.uuid4().hex[:8]
+        _, series = self.call_api("/series/create.php", {
+            "title": f"Deletion hierarchy {run_id}", "description": "",
+        })
+        series_id = series["series"]["id"]
+        _, season = self.call_api("/series/seasons/create.php", {
+            "series_id": series_id, "season_number": 1,
+        })
+        season_id = season["season"]["id"]
+        _, episode = self.call_api("/series/episodes/create.php", {
+            "season_id": season_id, "episode_number": 1, "title": "Queued episode",
+            "description": "", "duration_minutes": 1, "tier": "free",
+        })
+        episode_id = episode["episode"]["id"]
+        _, version = self.upload_series_version(episode_id, self.test_vj_id, b"queued-version")
+        version_id = version["version"]["id"]
+        version_key = self._last_series_upload_key
+
+        self.assertEqual(self.call_method_api_result(
+            f"/admin/series.php?id={series_id}", "DELETE",
+        )[0], 409)
+        self.assertEqual(self.call_method_api_result(
+            f"/admin/seasons.php?id={season_id}", "DELETE",
+        )[0], 409)
+        self.assertEqual(self.call_method_api_result(
+            f"/admin/episodes.php?id={episode_id}", "DELETE",
+        )[0], 409)
+        failed_object = ("rayn-test", version_key)
+        FakeR2Handler.delete_failures[failed_object] = 100
+        status, response = self.call_method_api_result(
+            f"/admin/episode-versions.php?id={version_id}", "DELETE",
+        )
+        self.assertEqual(status, 502)
+        _, detail_while_pending = self.get_api(f"/series/detail.php?id={series_id}")
+        pending_episode = detail_while_pending["series"]["seasons"][0]["episodes"][0]
+        self.assertFalse(pending_episode["available"])
+        self.assertEqual(pending_episode["versions"], [])
+        self.assert_get_api_error(f"/episodes/play.php?id={version_id}", 404)
+        FakeR2Handler.delete_failures.pop(failed_object, None)
+        self.assertEqual(self.call_method_api_result(
+            f"/admin/deletions/retry.php?id={response['deletion_job_id']}", "POST",
+        )[0], 200)
+        self.assertNotIn(("rayn-test", version_key), FakeR2Handler.objects)
+        self.assertEqual(self.call_method_api_result(
+            f"/admin/episodes.php?id={episode_id}", "DELETE",
+        )[0], 200)
+        self.assertEqual(self.call_method_api_result(
+            f"/admin/seasons.php?id={season_id}", "DELETE",
+        )[0], 200)
+        self.assertEqual(self.call_method_api_result(
+            f"/admin/series.php?id={series_id}", "DELETE",
+        )[0], 200)
 
 
 if __name__ == "__main__":
